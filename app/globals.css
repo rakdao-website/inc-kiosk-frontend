@@ -779,6 +779,53 @@ textarea {
   background: #595b60;
 }
 
+.voice-mic-btn {
+  display: grid;
+  width: 84px;
+  height: 84px;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: #6ecfe0;
+  color: #13282c;
+  cursor: pointer;
+}
+
+.voice-mic-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.voice-mic-btn svg {
+  width: 30px;
+  height: 30px;
+}
+
+.voice-mic-btn.listening {
+  animation: voice-pulse 1.4s ease-out infinite;
+}
+
+@keyframes voice-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(110, 207, 224, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 28px rgba(110, 207, 224, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(110, 207, 224, 0);
+  }
+}
+
+.voice-heard {
+  margin: 0;
+  min-height: 16px;
+  color: #62cbde;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+
 .voice-modal {
   position: fixed;
   inset: 0;

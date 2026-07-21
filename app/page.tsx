@@ -34,6 +34,7 @@ import {
   toTimeInputValue,
 } from "@/lib/time";
 import { centerRoomOptions } from "@/lib/kiosk-content";
+import { VoiceAssistantModal, type VoiceFieldConfig } from "@/components/kiosk/VoiceAssistantModal";
 
 type Visitor = {
   visitor_id: number;
@@ -175,7 +176,7 @@ export default function KioskPage() {
   const [visitSession, setVisitSession] = useState<VisitSession | null>(null);
   const [currentBookings, setCurrentBookings] = useState<CurrentBooking[]>([]);
   const [selectedService, setSelectedService] = useState<ServiceType>("meeting_room");
-  const [consentChecked, setConsentChecked] = useState(true);
+  const [consentChecked, setConsentChecked] = useState(false);
   const [events, setEvents] = useState<KioskEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<KioskEvent | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmationState | null>(null);
@@ -206,7 +207,7 @@ export default function KioskPage() {
   }, [step]);
 
   const firstName = useMemo(() => {
-    return visitor?.visitor_name?.split(" ")[0] || "John";
+    return visitor?.visitor_name?.split(" ")[0] || "";
   }, [visitor]);
 
   function resetFlow() {
@@ -637,6 +638,38 @@ export default function KioskPage() {
     }
   }
 
+  function voiceFieldsForCurrentStep(): VoiceFieldConfig[] {
+    if (step === "profile-lookup") {
+      return [
+        { key: "full_name", label: "Full Name", prompt: "What's your full name?", value: lookup.full_name, kind: "text" },
+        { key: "mobile_number", label: "Mobile Number", prompt: "What's your mobile number?", value: lookup.mobile_number, kind: "phone" },
+      ];
+    }
+    if (step === "register") {
+      return [
+        { key: "full_name", label: "Full Name", prompt: "What's your full name?", value: registration.full_name, kind: "text" },
+        { key: "mobile_number", label: "Mobile Number", prompt: "What's your mobile number?", value: registration.mobile_number, kind: "phone" },
+        { key: "email", label: "Email Address", prompt: "What's your email address?", value: registration.email, kind: "email" },
+      ];
+    }
+    if (step === "other") {
+      return [
+        { key: "notes", label: "Notes for CX", prompt: "Tell me what you'd like our team to know.", value: otherNotes, kind: "notes" },
+      ];
+    }
+    return [];
+  }
+
+  function handleVoiceFieldChange(key: string, value: string) {
+    if (step === "profile-lookup") {
+      setLookup((prev) => ({ ...prev, [key]: value }));
+    } else if (step === "register") {
+      setRegistration((prev) => ({ ...prev, [key]: value }));
+    } else if (step === "other" && key === "notes") {
+      setOtherNotes(value);
+    }
+  }
+
   const bookingTitle =
     selectedService === "podcast_studio"
       ? "Book the Podcast Studio"
@@ -771,7 +804,7 @@ export default function KioskPage() {
                   <span className="check-box">{consentChecked ? <Check /> : null}</span>
                   <span>I understand and consent to using facial recognition for future check-ins.</span>
                 </button>
-                <PrimaryButton disabled={busy} onClick={() => handleConsent(consentChecked)} icon={<ShieldCheck />}>
+                <PrimaryButton disabled={busy || !consentChecked} onClick={() => handleConsent(true)} icon={<ShieldCheck />}>
                   Yes, Enable Faster Check-In
                 </PrimaryButton>
                 <OutlineButton disabled={busy} onClick={() => handleConsent(false)}>
@@ -811,7 +844,7 @@ export default function KioskPage() {
 
             {step === "welcome-back" ? (
               <Screen>
-                <ScreenTitle title={`Welcome Back, ${firstName}`} />
+                <ScreenTitle title={firstName ? `Welcome Back, ${firstName}` : "Welcome Back"} />
                 <p className="screen-copy">It's great to see you again.</p>
                 {currentBookings.length > 0 ? (
                   <Panel>
@@ -965,11 +998,12 @@ export default function KioskPage() {
       </section>
       {voiceOpen ? (
         <div className="voice-modal">
-          <Panel>
-            <ScreenTitle title="Voice assistance is starting..." />
-            <p className="screen-copy">Use voice assistance as an alternative to typing when the voice service is connected.</p>
-            <PrimaryButton onClick={() => setVoiceOpen(false)}>Continue</PrimaryButton>
-          </Panel>
+          <VoiceAssistantModal
+            mode={step === "center" ? "room-question" : "fields"}
+            fields={voiceFieldsForCurrentStep()}
+            onFieldChange={handleVoiceFieldChange}
+            onDone={() => setVoiceOpen(false)}
+          />
         </div>
       ) : null}
       {confirmation ? (

@@ -34,6 +34,7 @@ import {
   toTimeInputValue,
 } from "@/lib/time";
 import { centerRoomOptions } from "@/lib/kiosk-content";
+import { VoiceAssistantModal, type VoiceFieldConfig } from "@/components/kiosk/VoiceAssistantModal";
 
 type Visitor = {
   visitor_id: number;
@@ -175,7 +176,7 @@ export default function KioskPage() {
   const [visitSession, setVisitSession] = useState<VisitSession | null>(null);
   const [currentBookings, setCurrentBookings] = useState<CurrentBooking[]>([]);
   const [selectedService, setSelectedService] = useState<ServiceType>("meeting_room");
-  const [consentChecked, setConsentChecked] = useState(true);
+  const [consentChecked, setConsentChecked] = useState(false);
   const [events, setEvents] = useState<KioskEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<KioskEvent | null>(null);
   const [confirmation, setConfirmation] = useState<ConfirmationState | null>(null);
@@ -206,7 +207,7 @@ export default function KioskPage() {
   }, [step]);
 
   const firstName = useMemo(() => {
-    return visitor?.visitor_name?.split(" ")[0] || "John";
+    return visitor?.visitor_name?.split(" ")[0] || "";
   }, [visitor]);
 
   function resetFlow() {
@@ -248,7 +249,7 @@ export default function KioskPage() {
   async function loadCurrentBookings(nextVisitor: Visitor) {
     try {
       const bookings = await requestJson<CurrentBooking[]>(
-        `/api/kiosk/current-bookings?visitor_id=${nextVisitor.visitor_id}`,
+        `/api/kiosk/current-bookings?visitor_id=${nextVisitor.visitor_id}`
       );
       setCurrentBookings(bookings);
     } catch (bookingError) {
@@ -392,7 +393,7 @@ export default function KioskPage() {
 
   async function captureFaceSamples(
     sampleCount = FACE_ENROLLMENT_SAMPLE_COUNT,
-    options: { updateEnrollmentProgress?: boolean } = {},
+    options: { updateEnrollmentProgress?: boolean } = {}
   ): Promise<string[]> {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("Camera access is not available in this browser.");
@@ -637,6 +638,120 @@ export default function KioskPage() {
     }
   }
 
+  // ===== VOICE AGENT EXTRACTION HANDLER =====
+  const handleVoiceExtracted = (data: { name: string; email: string; existingCustomer: boolean; phone?: string,zone_id?: string;
+  date?: string;
+  time?: string;
+  duration_minutes?: number; }) => {
+    if (step === "profile-lookup") {
+      // Fill lookup form with name and phone
+      setLookup({
+        full_name: data.name,
+        country_code: "+971",
+        mobile_number: data.phone || "",
+      });
+      // If not existing, switch to registration with pre‑filled fields
+      if (!data.existingCustomer) {
+        setRegistration({
+          full_name: data.name,
+          email: data.email || "",
+          visitor_type: "visitor",
+          country_code: "+971",
+          mobile_number: data.phone || "",
+        });
+        setStep("register");
+      }
+      // If existing, stay on lookup; user can press Continue to search profile.
+    } else if (step === "register") {
+      // If already on registration, fill remaining fields
+      setRegistration((prev) => ({
+        ...prev,
+        full_name: data.name || prev.full_name,
+        email: data.email || prev.email,
+        mobile_number: data.phone || prev.mobile_number,
+        visitor_type: data.existingCustomer ? "client" : "visitor",
+      }));
+    }
+    if (data.zone_id || data.date || data.time || data.duration_minutes) {
+    // Determine service type from zone_id
+    let service: ServiceType = "meeting_room";
+    if (data.zone_id?.startsWith("POD_")) service = "podcast_studio";
+    else if (data.zone_id?.startsWith("TTS_")) service = "tiktok_studio";
+
+    // Navigate to the correct booking step if not already there
+    if (step !== "booking" && step !== "booking-podcast" && step !== "booking-tiktok") {
+      setSelectedService(service);
+      if (service === "meeting_room") setStep("booking");
+      else if (service === "podcast_studio") setStep("booking-podcast");
+      else if (service === "tiktok_studio") setStep("booking-tiktok");
+    }
+        setBookingForm((prev) => ({
+      ...prev,
+      zoneId: data.zone_id || prev.zoneId,
+      date: data.date || prev.date,
+      time: data.time || prev.time,
+      duration: data.duration_minutes ? String(data.duration_minutes) : prev.duration,
+    }));
+    setVoiceOpen(false);
+    return;
+  }
+  setVoiceOpen(false);
+};
+
+  // ===== VOICE FIELDS FOR CURRENT STEP =====
+  function voiceFieldsForCurrentStep(): VoiceFieldConfig[] {
+    if (step === "profile-lookup") {
+      return [
+        { key: "full_name", label: "Full Name", prompt: "What's your full name?", value: lookup.full_name, kind: "text" },
+        { key: "mobile_number", label: "Mobile Number", prompt: "What's your mobile number?", value: lookup.mobile_number, kind: "phone" },
+      ];
+    }
+    if (step === "register") {
+      return [
+        { key: "full_name", label: "Full Name", prompt: "What's your full name?", value: registration.full_name, kind: "text" },
+        { key: "mobile_number", label: "Mobile Number", prompt: "What's your mobile number?", value: registration.mobile_number, kind: "phone" },
+        { key: "email", label: "Email Address", prompt: "What's your email address?", value: registration.email, kind: "email" },
+      ];
+    }
+    if (step === "booking" || step === "booking-podcast" || step === "booking-tiktok") {
+      return [
+        { key: "zone_id", label: "Room", prompt: "Which room would you like to book?", value: bookingForm.zoneId, kind: "text" },
+        { key: "booking_date", label: "Date", prompt: "Which date do you want?", value: bookingForm.date, kind: "text" },
+        { key: "booking_time_start", label: "Time", prompt: "What time should we reserve?", value: bookingForm.time, kind: "text" },
+        { key: "duration_minutes", label: "Duration", prompt: "How long do you need the room for?", value: bookingForm.duration, kind: "text" },
+      ];
+    }
+    if (step === "other") {
+      return [
+        { key: "notes", label: "Notes for CX", prompt: "Tell me what you'd like our team to know.", value: otherNotes, kind: "notes" },
+      ];
+    }
+    return [];
+  }
+
+  function handleVoiceFieldChange(key: string, value: string) {
+    if (step === "profile-lookup") {
+      if (key === "full_name") setLookup((prev) => ({ ...prev, full_name: value }));
+      else if (key === "mobile_number") setLookup((prev) => ({ ...prev, mobile_number: value }));
+    } else if (step === "register") {
+      if (key === "full_name") setRegistration((prev) => ({ ...prev, full_name: value }));
+      else if (key === "email") setRegistration((prev) => ({ ...prev, email: value }));
+      else if (key === "mobile_number") setRegistration((prev) => ({ ...prev, mobile_number: value }));
+    } else if (step === "other" && key === "notes") {
+      setOtherNotes(value);
+    } else if (step === "booking" || step === "booking-podcast" || step === "booking-tiktok") {
+      if (key === "zone_id") {
+        setBookingForm((prev) => ({ ...prev, zoneId: value }));
+      } else if (key === "booking_date") {
+        setBookingForm((prev) => ({ ...prev, date: value }));
+      } else if (key === "booking_time_start") {
+        setBookingForm((prev) => ({ ...prev, time: value }));
+      } else if (key === "duration_minutes") {
+        setBookingForm((prev) => ({ ...prev, duration: value.replace(/\D/g, "") }));
+      }
+    }
+  }
+
   const bookingTitle =
     selectedService === "podcast_studio"
       ? "Book the Podcast Studio"
@@ -647,6 +762,7 @@ export default function KioskPage() {
   return (
     <main className="min-h-screen bg-[#efefef] text-white">
       <section className="mx-auto grid min-h-screen place-items-center">
+        <GlobalVoiceButton onClick={() => setVoiceOpen(true)} />
         <div className="kiosk-frame">
           <TopBar />
           <div className="kiosk-content">
@@ -771,7 +887,7 @@ export default function KioskPage() {
                   <span className="check-box">{consentChecked ? <Check /> : null}</span>
                   <span>I understand and consent to using facial recognition for future check-ins.</span>
                 </button>
-                <PrimaryButton disabled={busy} onClick={() => handleConsent(consentChecked)} icon={<ShieldCheck />}>
+                <PrimaryButton disabled={busy || !consentChecked} onClick={() => handleConsent(true)} icon={<ShieldCheck />}>
                   Yes, Enable Faster Check-In
                 </PrimaryButton>
                 <OutlineButton disabled={busy} onClick={() => handleConsent(false)}>
@@ -811,7 +927,7 @@ export default function KioskPage() {
 
             {step === "welcome-back" ? (
               <Screen>
-                <ScreenTitle title={`Welcome Back, ${firstName}`} />
+                <ScreenTitle title={firstName ? `Welcome Back, ${firstName}` : "Welcome Back"} />
                 <p className="screen-copy">It's great to see you again.</p>
                 {currentBookings.length > 0 ? (
                   <Panel>
@@ -853,6 +969,7 @@ export default function KioskPage() {
               <Screen>
                 <ScreenTitle title="How Can We Help You?" />
                 <p className="screen-copy">Please select an option below.</p>
+                <PageVoiceButton onClick={() => setVoiceOpen(true)} />
                 <div className="service-grid">
                   {serviceCards.map((card) => (
                     <button className="service-card" key={card.id} onClick={() => handleServiceSelect(card.id)} type="button">
@@ -869,6 +986,7 @@ export default function KioskPage() {
               <Screen>
                 <ScreenTitle title={bookingTitle} />
                 <p className="screen-copy">Verify details and reserve your slot.</p>
+                <PageVoiceButton onClick={() => setVoiceOpen(true)} />
                 <BookingFormPanel
                   bookingForm={bookingForm}
                   busy={busy}
@@ -963,15 +1081,47 @@ export default function KioskPage() {
           <FooterHelp />
         </div>
       </section>
-      {voiceOpen ? (
-        <div className="voice-modal">
-          <Panel>
-            <ScreenTitle title="Voice assistance is starting..." />
-            <p className="screen-copy">Use voice assistance as an alternative to typing when the voice service is connected.</p>
-            <PrimaryButton onClick={() => setVoiceOpen(false)}>Continue</PrimaryButton>
-          </Panel>
-        </div>
-      ) : null}
+      {/* ===== VOICE ASSISTANT MODAL ===== */}
+      {voiceOpen && (
+      <div className="voice-modal">
+      <VoiceAssistantModal
+      mode="fields"
+      fields={voiceFieldsForCurrentStep()}
+      onFieldChange={handleVoiceFieldChange}
+      onExtracted={handleVoiceExtracted}
+      // Use booking endpoint if visitor exists and not on login/registration
+      agentEndpoint={
+        visitor && (step !== "profile-lookup" && step !== "register")
+          ? "http://localhost:8000/voice-agent/booking"
+          : "http://localhost:8000/voice-agent/converse"
+      }
+      agentPayload={
+        visitor && (step !== "profile-lookup" && step !== "register")
+          ? {
+              visitor_id: visitor.visitor_id,
+              service_type:
+                step === "booking-podcast"
+                  ? "podcast_studio"
+                  : step === "booking-tiktok"
+                  ? "tiktok_studio"
+                  : "meeting_room",
+            }
+          : undefined
+      }
+      agentFieldMapping={
+        visitor && (step !== "profile-lookup" && step !== "register")
+          ? undefined  // Booking doesn't need field mapping; we use onExtracted for booking data
+          : {
+              name: "full_name",
+              email: "email",
+              existingCustomer: "visitor_type",
+              phone: "mobile_number",
+            }
+      }
+      onDone={() => setVoiceOpen(false)}
+    />
+  </div>
+)}
       {confirmation ? (
         <div className="voice-modal confirmation-modal">
           <div className="confirmation-card">
@@ -1100,6 +1250,20 @@ function PageVoiceButton({ onClick }: { onClick: () => void }) {
     <button className="page-voice-btn" onClick={onClick} type="button">
       <Mic />
       <span>Use Voice Assistance</span>
+    </button>
+  );
+}
+
+function GlobalVoiceButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      className="page-voice-btn"
+      onClick={onClick}
+      style={{ position: "fixed", right: 24, bottom: 24, zIndex: 60 }}
+      type="button"
+    >
+      <Mic />
+      <span>Voice Assistant</span>
     </button>
   );
 }

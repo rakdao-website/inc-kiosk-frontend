@@ -51,9 +51,27 @@ type VisitSession = {
   is_returning_visitor: boolean;
 };
 
+type FaceCheckSuggestion = {
+  rank: number;
+  source_url: string;
+  score?: number | null;
+  thumbnail_base64?: string | null;
+};
+
 type RecognitionResult = {
   recognized: boolean;
   visitor_id?: number | null;
+  matched_name?: string | null;
+  confidence?: number | null;
+  capture_id?: number | null;
+  facecheck_suggestions?: FaceCheckSuggestion[] | null;
+};
+
+type LinkCaptureResult = {
+  capture_id: number;
+  visitor_id: number;
+  face_identifier?: string | null;
+  enrolled: boolean;
 };
 
 type FaceProfileResult = {
@@ -171,6 +189,12 @@ export default function KioskPage() {
   const [step, setStep] = useState<KioskStep>("start");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [captureId, setCaptureId] = useState<number | null>(null);
+  const [facecheckSuggestions, setFacecheckSuggestions] = useState<FaceCheckSuggestion[] | null>(null);
+  const [scanState, setScanState] = useState<"idle" | "scanning" | "recognized" | "unknown">("idle");
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewStreamRef = useRef<MediaStream | null>(null);
+  const autoScanTriggeredRef = useRef(false);
   const [visitor, setVisitor] = useState<Visitor | null>(null);
   const [visitSession, setVisitSession] = useState<VisitSession | null>(null);
   const [currentBookings, setCurrentBookings] = useState<CurrentBooking[]>([]);
@@ -200,9 +224,63 @@ export default function KioskPage() {
   });
 
   useEffect(() => {
-    if (step !== "thank-you") return;
-    const timeout = window.setTimeout(resetFlow, 6000);
-    return () => window.clearTimeout(timeout);
+    if (step !== "start") {
+      if (previewStreamRef.current) {
+        previewStreamRef.current.getTracks().forEach((track) => track.stop());
+        previewStreamRef.current = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+    navigator.mediaDevices
+      ?.getUserMedia({ video: { facingMode: "user" }, audio: false })
+      .then((stream) => {
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        previewStreamRef.current = stream;
+        if (previewVideoRef.current) {
+          previewVideoRef.current.srcObject = stream;
+        }
+      })
+      .catch(() => {
+        /* camera preview optional; capture flow still handles its own access */
+      });
+
+    return () => {
+      cancelled = true;
+      if (previewStreamRef.current) {
+        previewStreamRef.current.getTracks().forEach((track) => track.stop());
+        previewStreamRef.current = null;
+      }
+    };
+  }, [step]);
+
+  useEffect(() => {
+    if (step !== "start") {
+      // Leaving the start screen (visit finished / reset) re-arms the
+      // trigger so the *next* visitor's page-open fires a fresh scan.
+      autoScanTriggeredRef.current = false;
+      return;
+    }
+    if (autoScanTriggeredRef.current) {
+      return;
+    }
+    // Give the page a beat to settle (camera preview above is also
+    // requesting getUserMedia) before firing the automatic scan.
+    // Note: the ref is only marked "consumed" inside the timeout callback,
+    // not before scheduling it -- this matters because Next.js dev mode
+    // double-invokes effects on mount (cleanup then re-run), which would
+    // otherwise cancel this timer on the first pass and skip re-arming it
+    // on the second, silently swallowing the auto-trigger.
+    const timer = window.setTimeout(() => {
+      autoScanTriggeredRef.current = true;
+      handleFaceScan();
+    }, 400);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
 
   const firstName = useMemo(() => {
@@ -216,6 +294,8 @@ export default function KioskPage() {
     setVisitor(null);
     setVisitSession(null);
     setCurrentBookings([]);
+    setCaptureId(null);
+    setFacecheckSuggestions(null);
     setSelectedEvent(null);
     setConfirmation(null);
     setBookingForm({ ...initialBookingForm, date: todayIso() });
@@ -276,38 +356,57 @@ export default function KioskPage() {
   async function handleFaceScan() {
     setBusy(true);
     setError(null);
+    setScanState("scanning");
     try {
-      const fastImages = await captureFaceSamples(FACE_LOGIN_SAMPLE_COUNT, {
+      const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT, {
         updateEnrollmentProgress: false,
       });
-      let result = await requestJson<RecognitionResult>("/api/kiosk/recognize-face", {
+      const result = await requestJson<RecognitionResult>("/api/kiosk/recognize-face", {
         method: "POST",
-        body: JSON.stringify({ images_base64: fastImages }),
+        body: JSON.stringify({ images_base64: images }),
       });
 
-      if (!result.recognized) {
-        const retryImages = await captureFaceSamples(FACE_LOGIN_RETRY_SAMPLE_COUNT, {
-          updateEnrollmentProgress: false,
-        });
-        result = await requestJson<RecognitionResult>("/api/kiosk/recognize-face", {
-          method: "POST",
-          body: JSON.stringify({ images_base64: retryImages }),
-        });
-      }
-
       if (result.recognized && result.visitor_id) {
+        setScanState("recognized");
         const foundVisitor = await requestJson<Visitor>(`/api/kiosk/visitors/${result.visitor_id}`);
         setVisitor(foundVisitor);
         await createSession(foundVisitor, "face");
         await loadCurrentBookings(foundVisitor);
+        setStep("welcome-back");
+        return;
       }
 
-      setStep(nextStepAfterRecognition(result.recognized));
+      if (result.capture_id) {
+        setCaptureId(result.capture_id);
+      }
+
+      if (result.facecheck_suggestions && result.facecheck_suggestions.length > 0) {
+        setScanState("unknown");
+        setFacecheckSuggestions(result.facecheck_suggestions);
+        return;
+      }
+
+      setScanState("idle");
+      setStep(nextStepAfterRecognition(false));
     } catch (scanError) {
       setError(scanError instanceof Error ? scanError.message : "Face scan failed.");
+      setScanState("idle");
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleFaceCheckRespond() {
+    // Whether the visitor picked one of the FaceCheckID suggestions or said
+    // "none of these", the next step is the same: collect their details and
+    // link that capture to a (new or found) visitor. The chosen suggestion
+    // itself doesn't need to travel with them -- it's already stored in
+    // face_web_matches against this capture_id for admin review later.
+    setFacecheckSuggestions(null);
+    setScanState("idle");
+    setError(null);
+    setRegistration((value) => ({ ...value }));
+    setStep("register");
   }
 
   async function handleProfileLookup(event: FormEvent<HTMLFormElement>) {
@@ -338,11 +437,40 @@ export default function KioskPage() {
     setBusy(true);
     setError(null);
     try {
+      const mobileNumber = `${registration.country_code}${normalizeLocalMobileNumber(registration.mobile_number)}`;
+
+      if (captureId) {
+        // Came from the FaceCheckID "is this you?" prompt: the face we just
+        // scanned is already saved against this capture, so linking it also
+        // enrolls it as this visitor's face profile in one step -- no need
+        // for a second face-scan/consent step.
+        const linkResult = await requestJson<LinkCaptureResult>(
+          `/api/face/captures/${captureId}/link`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              full_name: registration.full_name,
+              mobile_number: mobileNumber,
+              email: registration.email,
+              visitor_type: registration.visitor_type,
+              enroll_face: true,
+            }),
+          },
+        );
+        const linkedVisitor = await requestJson<Visitor>(`/api/kiosk/visitors/${linkResult.visitor_id}`);
+        setVisitor(linkedVisitor);
+        setCaptureId(null);
+        await createSession(linkedVisitor, "face");
+        await loadCurrentBookings(linkedVisitor);
+        setStep("welcome-back");
+        return;
+      }
+
       const createdVisitor = await requestJson<Visitor>("/api/kiosk/profiles", {
         method: "POST",
         body: JSON.stringify({
           full_name: registration.full_name,
-          mobile_number: `${registration.country_code}${normalizeLocalMobileNumber(registration.mobile_number)}`,
+          mobile_number: mobileNumber,
           email: registration.email,
           visitor_type: registration.visitor_type,
           company_name: null,
@@ -656,7 +784,11 @@ export default function KioskPage() {
               <Screen>
                 <ScreenTitle title="Welcome to Innovation City" center />
                 <p className="screen-copy text-center">Please look at the camera while we check your registration.</p>
-                <FaceOrb label={busy ? "SCANNING FACE..." : "READY TO SCAN"} />
+                <LiveFaceOrb
+                  videoRef={previewVideoRef}
+                  label={busy ? "SCANNING FACE..." : "READY TO SCAN"}
+                  scanState={scanState}
+                />
                 <PrimaryButton disabled={busy} onClick={handleFaceScan}>
                   {busy ? "Scanning..." : "Start Face Scan"}
                 </PrimaryButton>
@@ -972,6 +1104,47 @@ export default function KioskPage() {
           </Panel>
         </div>
       ) : null}
+
+      {facecheckSuggestions ? (
+        <div className="voice-modal confirmation-modal">
+          <div className="confirmation-card suggestions-card">
+            <h2>Is This You?</h2>
+            <p>We searched publicly available photos and found a few possible matches. Tap yours, or let us know if none match.</p>
+            <div className="suggestion-grid">
+              {facecheckSuggestions.map((candidate) => (
+                <button
+                  className="suggestion-option"
+                  disabled={busy}
+                  key={candidate.rank}
+                  onClick={handleFaceCheckRespond}
+                  type="button"
+                >
+                  <span className="suggestion-photo">
+                    {candidate.thumbnail_base64 ? (
+                      <img alt={`Possible match ${candidate.rank}`} src={candidate.thumbnail_base64} />
+                    ) : (
+                      candidate.rank
+                    )}
+                  </span>
+                  {typeof candidate.score === "number" ? (
+                    <span
+                      className="suggestion-score"
+                      style={{ fontSize: "0.8rem", opacity: 0.7, display: "block", marginTop: "2px" }}
+                    >
+                      {Math.round(candidate.score * 100)}% match
+                    </span>
+                  ) : null}
+                  <span className="suggestion-name">Yes, this is me</span>
+                </button>
+              ))}
+            </div>
+            <OutlineButton disabled={busy} onClick={handleFaceCheckRespond}>
+              None of these — Continue to Registration
+            </OutlineButton>
+          </div>
+        </div>
+      ) : null}
+
       {confirmation ? (
         <div className="voice-modal confirmation-modal">
           <div className="confirmation-card">
@@ -1133,6 +1306,28 @@ function FaceOrb({ label }: { label: string }) {
         <div className="scan-core"><Sparkles /></div>
       </div>
       <div className="scan-line" />
+      <p>{label}</p>
+    </div>
+  );
+}
+
+function LiveFaceOrb({
+  videoRef,
+  label,
+  scanState,
+}: {
+  videoRef: React.RefObject<HTMLVideoElement>;
+  label: string;
+  scanState: "idle" | "scanning" | "recognized" | "unknown";
+}) {
+  return (
+    <div className="face-area">
+      <div className={`camera-ring ${scanState === "recognized" ? "recognized" : scanState === "unknown" ? "unknown" : ""}`}>
+        <div className="camera-video-wrap">
+          <video autoPlay className="camera-video" muted playsInline ref={videoRef} />
+          {scanState === "scanning" ? <div className="camera-scanline" /> : null}
+        </div>
+      </div>
       <p>{label}</p>
     </div>
   );

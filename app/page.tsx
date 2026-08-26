@@ -18,6 +18,7 @@ import {
   Video,
 } from "lucide-react";
 import { ApiRequestError, requestJson } from "@/lib/api";
+import { VoiceAssistant } from "@/components/kiosk/VoiceAssistant";
 import {
   isBookableService,
   nextStepAfterRecognition,
@@ -373,6 +374,7 @@ export default function KioskPage() {
         await createSession(foundVisitor, "face");
         await loadCurrentBookings(foundVisitor);
         setStep("welcome-back");
+        setVoiceOpen(true);
         return;
       }
 
@@ -425,6 +427,7 @@ export default function KioskPage() {
       await createSession(foundVisitor, "lookup");
       await loadCurrentBookings(foundVisitor);
       setStep("welcome-back");
+      setVoiceOpen(true);
     } catch (lookupError) {
       setError(lookupError instanceof Error ? lookupError.message : "Profile not found.");
     } finally {
@@ -463,6 +466,7 @@ export default function KioskPage() {
         await createSession(linkedVisitor, "face");
         await loadCurrentBookings(linkedVisitor);
         setStep("welcome-back");
+        setVoiceOpen(true);
         return;
       }
 
@@ -977,6 +981,7 @@ export default function KioskPage() {
                 <PrimaryButton onClick={() => setStep(currentBookings.length > 0 ? "thank-you" : "service-selection")}>
                   Finish
                 </PrimaryButton>
+                <PageVoiceButton onClick={() => setVoiceOpen(true)} />
                 <OutlineButton onClick={() => setStep("service-selection")}>Other Services</OutlineButton>
               </Screen>
             ) : null}
@@ -1095,15 +1100,15 @@ export default function KioskPage() {
           <FooterHelp />
         </div>
       </section>
-      {voiceOpen ? (
-        <div className="voice-modal">
-          <Panel>
-            <ScreenTitle title="Voice assistance is starting..." />
-            <p className="screen-copy">Use voice assistance as an alternative to typing when the voice service is connected.</p>
-            <PrimaryButton onClick={() => setVoiceOpen(false)}>Continue</PrimaryButton>
-          </Panel>
-        </div>
-      ) : null}
+      <VoiceAssistant
+        open={voiceOpen}
+        onClose={() => setVoiceOpen(false)}
+        knownVisitor={
+          visitor
+            ? { visitor_id: visitor.visitor_id, visitor_name: visitor.visitor_name, visitor_type: visitor.visitor_type }
+            : null
+        }
+      />
 
       {facecheckSuggestions ? (
         <div className="voice-modal confirmation-modal">

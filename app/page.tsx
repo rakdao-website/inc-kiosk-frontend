@@ -10,10 +10,11 @@ import {
   ClipboardList,
   Home,
   KeyRound,
-  Mic,
+  Phone,
   Podcast,
   ShieldCheck,
   Sparkles,
+  User,
   UserRoundPlus,
   Video,
 } from "lucide-react";
@@ -595,6 +596,50 @@ export default function KioskPage() {
     }
   }
 
+  // Narrower than enrollFaceForVisitor above: just captures + saves a face
+  // photo, without navigating the page or creating a session -- called
+  // from inside the voice assistant's register_visitor tool, where the
+  // visitor could be on any screen and the voice conversation should just
+  // continue afterward, not redirect them anywhere.
+  async function handleVoiceFaceEnrollment(voiceVisitor: { visitor_id: number; visitor_name: string; visitor_type: string }) {
+    const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT);
+    await requestJson<FaceProfileResult>("/api/kiosk/face-profile", {
+      method: "POST",
+      body: JSON.stringify({
+        visitor_id: voiceVisitor.visitor_id,
+        images_base64: images,
+      }),
+    });
+    // Reflect the newly registered + enrolled visitor in the page's own
+    // state too, so the underlying kiosk screen (and any later reconnect
+    // to voice assistance) already knows who they are.
+    const fullVisitor = await requestJson<Visitor>(`/api/kiosk/visitors/${voiceVisitor.visitor_id}`);
+    setVisitor(fullVisitor);
+  }
+
+  // Called live from the voice assistant's capture_registration_field tool
+  // as soon as the visitor gives ANY single piece of info -- populates the
+  // visible registration form fields in sync with the conversation. Only
+  // updates fields actually provided (spread over previous state), and
+  // navigates to the "register" screen if the visitor isn't already
+  // somewhere the fields would be visible, so this is never silently
+  // updating state behind an unrelated screen.
+  function handleVoiceFormFieldUpdate(fields: {
+    full_name?: string;
+    mobile_number?: string;
+    email?: string;
+    visitor_type?: "visitor" | "client";
+  }) {
+    setRegistration((prev) => ({
+      ...prev,
+      ...(fields.full_name !== undefined ? { full_name: fields.full_name } : {}),
+      ...(fields.mobile_number !== undefined ? { mobile_number: fields.mobile_number } : {}),
+      ...(fields.email !== undefined ? { email: fields.email } : {}),
+      ...(fields.visitor_type !== undefined ? { visitor_type: fields.visitor_type } : {}),
+    }));
+    setStep((currentStep) => (currentStep === "register" ? currentStep : "register"));
+  }
+
   async function retryFaceEnrollment() {
     const nextVisitor = enrollmentVisitorRef.current || visitor;
     if (!nextVisitor) return;
@@ -781,7 +826,7 @@ export default function KioskPage() {
       <section className="mx-auto grid min-h-screen place-items-center">
         <div className="kiosk-frame">
           <TopBar />
-          <div className="kiosk-content">
+          <div className="kiosk-content" style={{ paddingBottom: "56px" }}>
             {error ? <StatusBanner tone="error" message={error} /> : null}
 
             {step === "start" ? (
@@ -801,11 +846,12 @@ export default function KioskPage() {
 
             {step === "profile-lookup" ? (
               <Screen>
-                <ScreenTitle title="Face Not Recognized" />
-                <p className="screen-copy">Please enter your details so we can find your profile.</p>
+                <ScreenTitle title="Face Not Recognized" fontSize="20px" />
+                <p className="screen-copy">Please enter your details so we can find your profile</p>
                 <form className="stack" onSubmit={handleProfileLookup}>
                   <Panel>
                     <Field
+                      icon={<User size={18} />}
                       label="Full Name"
                       onChange={(event) => setLookup((value) => ({ ...value, full_name: event.target.value }))}
                       placeholder="Enter your full name"
@@ -813,6 +859,7 @@ export default function KioskPage() {
                       value={lookup.full_name}
                     />
                     <Field
+                      icon={<Phone size={18} />}
                       label="Mobile Number"
                       onChange={(event) => setLookup((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
                       placeholder="50 123 4567"
@@ -830,7 +877,7 @@ export default function KioskPage() {
                   <PrimaryButton disabled={busy} type="submit">Continue</PrimaryButton>
                   <p className="inline-note">
                     Don't have an account?{" "}
-                    <button onClick={handleRegisterLink} type="button">Press here to register.</button>
+                    <button onClick={handleRegisterLink} type="button">Press here to register</button>
                   </p>
                 </form>
               </Screen>
@@ -1059,7 +1106,7 @@ export default function KioskPage() {
                     </div>
                   ))}
                 </div>
-                <PrimaryButton onClick={() => setVoiceOpen(true)} icon={<Mic />}>Start Voice Assistance</PrimaryButton>
+                <PrimaryButton onClick={() => setVoiceOpen(true)} icon={<SkyIcon size={18} />}>Start Voice Assistance</PrimaryButton>
                 <OutlineButton onClick={() => setStep("service-selection")}>Back</OutlineButton>
               </Screen>
             ) : null}
@@ -1108,6 +1155,8 @@ export default function KioskPage() {
             ? { visitor_id: visitor.visitor_id, visitor_name: visitor.visitor_name, visitor_type: visitor.visitor_type }
             : null
         }
+        onNeedFaceEnrollment={handleVoiceFaceEnrollment}
+        onFormFieldUpdate={handleVoiceFormFieldUpdate}
       />
 
       {facecheckSuggestions ? (
@@ -1165,11 +1214,133 @@ export default function KioskPage() {
 }
 
 function TopBar() {
+  const [now, setNow] = useState(new Date());
+  const [weather, setWeather] = useState<{ temp: number } | null>(null);
+
+  // Live clock -- ticks every second so the displayed time is always real,
+  // not a snapshot from when the page loaded.
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Real weather via Open-Meteo (free, no API key). Coordinates are Ras Al
+  // Khaimah, UAE -- update these if Innovation City is elsewhere. Weather
+  // doesn't need second-by-second freshness, so this only refreshes every
+  // 15 minutes, and fails silently (header still shows date/time) if the
+  // request doesn't succeed.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadWeather() {
+      try {
+        const res = await fetch(
+          "https://api.open-meteo.com/v1/forecast?latitude=25.7895&longitude=55.9432&current_weather=true"
+        );
+        const data = await res.json();
+        if (!cancelled && data?.current_weather) {
+          setWeather({ temp: Math.round(data.current_weather.temperature) });
+        }
+      } catch {
+        // Weather is a nice-to-have -- the header still works without it.
+      }
+    }
+    loadWeather();
+    const interval = setInterval(loadWeather, 15 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Explicit timeZone so the header is correct even if the kiosk machine's
+  // own OS clock/timezone setting is ever wrong.
+  const timeZone = "Asia/Dubai";
+  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone });
+  // Abbreviated to 3 letters (SUN, MON, ...) -- this header now also has to
+  // fit a centered logo on a narrow portrait kiosk screen, leaving much
+  // less room than a plain weather+clock bar would, so the longest day
+  // names ("WEDNESDAY") can't be spelled out without forcing truncation.
+  const dayName = now.toLocaleDateString("en-US", { weekday: "short", timeZone }).toUpperCase();
+  const monthDayStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone }).toUpperCase();
+
+  const ACCENT = "#8fb1ff";
+
+  const dimTextStyle: React.CSSProperties = {
+    fontSize: "7px",
+    letterSpacing: "0",
+    color: "#8b93a8",
+    marginTop: "2px",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  };
+  const valueTextStyle: React.CSSProperties = {
+    fontSize: "15px",
+    fontWeight: 600,
+    color: "#f5f7fb",
+    whiteSpace: "nowrap",
+  };
+  const dividerStyle: React.CSSProperties = {
+    width: "1px",
+    height: "30px",
+    background: "rgba(255,255,255,0.15)",
+    flexShrink: 0,
+  };
+
   return (
-    <header className="top-bar">
-      <div className="brand">
-        <img alt="Innovation City logo" src="/brand/innovation-city-mark.png" />
-        <span>INNOVATION CITY</span>
+    <header className="top-bar" style={{ padding: "10px 8px", width: "100%", boxSizing: "border-box" }}>
+      <div
+        style={{
+          // Logo dropped to 26px height (was 32px) -- the previous 32px
+          // calculation assumed a 400px-wide kiosk, but the actual
+          // reference frame this design is based on is 360px, which
+          // leaves meaningfully less room. Recalculated against 360px
+          // this time for a real ~13px margin instead of guessing again.
+          display: "grid",
+          gridTemplateColumns: "1.15fr auto 0.85fr",
+          alignItems: "center",
+          columnGap: "10px",
+          width: "100%",
+          boxSizing: "border-box",
+          border: "1px solid rgba(255,255,255,0.14)",
+          borderRadius: "12px",
+          background: "rgba(255,255,255,0.03)",
+          padding: "10px 12px",
+        }}
+      >
+        {/* justifyContent: flex-start now hugs the temperature to the
+            OUTER left edge of the pill, with the divider trailing behind
+            it (whatever slack space exists sits between the text and the
+            divider/logo, not between the text and the pill's edge). */}
+        <div style={{ minWidth: 0, textAlign: "left", display: "flex", alignItems: "center", justifyContent: "flex-start" }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={valueTextStyle}>{weather ? `${weather.temp}°C` : "--°C"}</div>
+            <div style={dimTextStyle}>
+              <span style={{ color: ACCENT }}>UAE</span> | RAS AL KHAIMAH
+            </div>
+          </div>
+          <div style={{ ...dividerStyle, marginLeft: "10px" }} />
+        </div>
+
+        <div className="brand" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <img
+            alt="Innovation City"
+            src="/brand/innovation-city-mark.png"
+            style={{ height: "22px", width: "auto" }}
+          />
+        </div>
+
+        {/* justifyContent: flex-end hugs the time to the OUTER right edge
+            of the pill, mirroring the weather side. */}
+        <div style={{ minWidth: 0, textAlign: "right", display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+          <div style={{ ...dividerStyle, marginRight: "10px" }} />
+          <div style={{ minWidth: 0 }}>
+            <div style={valueTextStyle}>{timeStr}</div>
+            <div style={dimTextStyle}>
+              <span style={{ color: ACCENT }}>{dayName}</span> | {monthDayStr}
+            </div>
+          </div>
+        </div>
       </div>
     </header>
   );
@@ -1179,7 +1350,6 @@ function FooterHelp() {
   return (
     <footer className="footer-help">
       <p>Please ask an Innovation Hub associate if you require assistance.</p>
-      <span />
     </footer>
   );
 }
@@ -1188,8 +1358,15 @@ function Screen({ children, scroll = false }: { children: React.ReactNode; scrol
   return <div className={scroll ? "screen screen-scroll" : "screen"}>{children}</div>;
 }
 
-function ScreenTitle({ title, center = false }: { title: string; center?: boolean }) {
-  return <h1 className={center ? "screen-title text-center" : "screen-title"}>{title}</h1>;
+function ScreenTitle({ title, center = false, fontSize }: { title: string; center?: boolean; fontSize?: string }) {
+  return (
+    <h1
+      className={center ? "screen-title text-center" : "screen-title"}
+      style={fontSize ? { fontSize, whiteSpace: "nowrap" } : undefined}
+    >
+      {title}
+    </h1>
+  );
 }
 
 function Panel({ children, compact = false }: { children: React.ReactNode; compact?: boolean }) {
@@ -1241,17 +1418,35 @@ function OutlineButton({
 function Field({
   label,
   leadingAddon,
+  icon,
   ...props
 }: React.InputHTMLAttributes<HTMLInputElement> & {
   label: string;
   leadingAddon?: React.ReactNode;
+  icon?: React.ReactNode;
 }) {
   return (
-    <label className="field">
-      <span>{label}</span>
-      <div className={["input-wrap", leadingAddon ? "with-prefix" : ""].join(" ")}>
+    <label className="field" style={{ marginBottom: "14px" }}>
+      <span style={{ display: "block", marginBottom: "6px" }}>{label}</span>
+      <div className={["input-wrap", leadingAddon ? "with-prefix" : ""].join(" ")} style={{ position: "relative" }}>
         {leadingAddon ? <div className="input-prefix">{leadingAddon}</div> : null}
-        <input {...props} />
+        {icon && !leadingAddon ? (
+          <span
+            style={{
+              position: "absolute",
+              left: "12px",
+              top: "50%",
+              transform: "translateY(-50%)",
+              display: "flex",
+              alignItems: "center",
+              color: "rgba(255,255,255,0.4)",
+              pointerEvents: "none",
+            }}
+          >
+            {icon}
+          </span>
+        ) : null}
+        <input {...props} style={icon && !leadingAddon ? { paddingLeft: "38px" } : undefined} />
       </div>
     </label>
   );
@@ -1273,10 +1468,79 @@ function TextAreaField({
   );
 }
 
+function SkyIcon({ size = 22, animated = true }: { size?: number; animated?: boolean }) {
+  // Aspect ratio from the source art (157x165) so the icon never distorts
+  // at different sizes.
+  const width = size * (157 / 165);
+
+  // Plain React state driving the morph instead of a CSS @keyframes
+  // animation -- simpler to reason about and verify, no dependency on
+  // styled-jsx's build-time class scoping working correctly with SVG
+  // children. A setInterval flips a boolean; each path's opacity responds
+  // via a CSS transition, so the fade itself is still smooth.
+  const [smiling, setSmiling] = useState(false);
+  useEffect(() => {
+    if (!animated) return;
+    const interval = setInterval(() => setSmiling((prev) => !prev), 1500);
+    return () => clearInterval(interval);
+  }, [animated]);
+
+  return (
+    <span style={{ position: "relative", display: "inline-block", width, height: size, verticalAlign: "middle" }}>
+      <img
+        src="/brand/sky-head-base.png"
+        alt="Sky"
+        style={{ width: "100%", height: "100%", display: "block" }}
+      />
+      {/* Position/size corrected: left=24.8%, width=58% match the mouth's
+          ACTUAL measured pixel position in the source art exactly (that
+          part was always right). The previous version shifted "left" to
+          make room for a taller box for the smile dip, WITHOUT adjusting
+          width to compensate -- that mismatch is what pushed the line
+          past the face's edge on one side. This version only adjusts
+          top/height (centered on the original line's vertical center),
+          leaving the correct horizontal values untouched. */}
+      <svg
+        viewBox="0 0 100 30"
+        preserveAspectRatio="none"
+        style={{
+          position: "absolute",
+          top: "39.3%",
+          left: "24.8%",
+          width: "58%",
+          height: "14%",
+        }}
+      >
+        <path
+          d="M 28,15 L 72,15"
+          stroke="#f5f7fb"
+          strokeWidth="6"
+          strokeLinecap="round"
+          fill="none"
+          style={animated ? { opacity: smiling ? 0 : 1, transition: "opacity 0.6s ease-in-out" } : { opacity: 1 }}
+        />
+        <path
+          d="M 28,10 Q 50,27 72,10"
+          stroke="#f5f7fb"
+          strokeWidth="6"
+          strokeLinecap="round"
+          fill="none"
+          style={animated ? { opacity: smiling ? 1 : 0, transition: "opacity 0.6s ease-in-out" } : { opacity: 0 }}
+        />
+      </svg>
+    </span>
+  );
+}
+
 function PageVoiceButton({ onClick }: { onClick: () => void }) {
   return (
-    <button className="page-voice-btn" onClick={onClick} type="button">
-      <Mic />
+    <button
+      className="page-voice-btn"
+      onClick={onClick}
+      type="button"
+      style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 18px" }}
+    >
+      <SkyIcon size={48} />
       <span>Use Voice Assistance</span>
     </button>
   );
@@ -1341,7 +1605,7 @@ function LiveFaceOrb({
 function VoiceOrb() {
   return (
     <div className="voice-orb">
-      <div><Mic /></div>
+      <div><SkyIcon size={40} /></div>
     </div>
   );
 }

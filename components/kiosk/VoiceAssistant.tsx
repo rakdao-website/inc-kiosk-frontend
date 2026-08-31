@@ -1,17 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebSocket, tool, backgroundResult } from "@openai/agents/realtime";
+import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC, tool, backgroundResult } from "@openai/agents/realtime";
 import { z } from "zod";
-import { X } from "lucide-react";
+import { Mic, MicOff, X } from "lucide-react";
 import { KioskButton } from "./KioskButton";
-
-// PCM16 sample rate used throughout - both capture and playback contexts
-// are created at this rate to avoid needing to resample. NOTE: not
-// explicitly confirmed against OpenAI's Realtime API docs that exactly
-// 24kHz is required for pcm16 - if audio sounds pitched wrong, check this
-// first against the current API reference.
-const PCM_SAMPLE_RATE = 24000;
 
 // With barge-in enabled, the mic stays live even while the assistant is
 // talking - which means its own voice bleeding back in (no headphones, or
@@ -21,6 +14,26 @@ const PCM_SAMPLE_RATE = 24000;
 const MIN_REAL_SPEECH_MS = 400;
 
 const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+// The one fixed line the assistant must say right before ending every call.
+// Edit CLOSING_TAGLINE directly to change it -- it's enforced in the prompt
+// (buildInstructions below), not left up to the model to remember on its own.
+const CLOSING_TAGLINE = "Built by Ayah and Dima, two AI engineers so good, we should be illegal. We're open to opportunities, so if you're hiring... this is your sign!";
+const CLOSING_LINE = `Goodbye, and thank you for visiting - ${CLOSING_TAGLINE}`;
+
+// response.done means the model finished GENERATING the closing line, not
+// that the audio has finished PLAYING -- there's a real gap between those,
+// and it grows with how long CLOSING_LINE is. Disconnecting on response.done
+// alone cuts the audio off mid-sentence. This estimates how long the line
+// takes to speak so we can wait that long before tearing down the session.
+function estimateSpeechMs(text: string): number {
+  const words = text.trim().split(/\s+/).length;
+  const WORDS_PER_SECOND = 2.5; // conservative on purpose -- better to wait
+  // slightly too long (a beat of silence) than cut audio off early.
+  return Math.round((words / WORDS_PER_SECOND) * 1000) + 1200; // + playback/network cushion
+}
+
+const CLOSING_LINE_SPEECH_MS = estimateSpeechMs(CLOSING_LINE);
 
 // Known room -> (service_type, zone_id) mapping, matching
 // kiosk_flow_services.py's SERVICE_DEFAULTS. Update here if your actual
@@ -36,10 +49,10 @@ const ROOM_MAP: Record<string, { service_type: string; zone_id: string }> = {
 // prefix (unlike the original Vite tester's paths) -- these point at
 // public/images/{file} in inc-kiosk-frontend.
 const ROOM_DISPLAY_INFO: Record<string, { label: string; imageUrl: string }> = {
-  meeting_room_1: { label: "Meeting Room 1", imageUrl: "/images/meeting_rooms.jpg" },
-  meeting_room_2: { label: "Meeting Room 2", imageUrl: "/images/meeting_rooms.jpg" },
-  podcast_studio: { label: "Podcast Studio", imageUrl: "/images/podcast.jpg" },
-  tiktok_studio: { label: "TikTok Studio", imageUrl: "/images/tiktok.png" },
+  meeting_room_1: { label: "Meeting Room 1", imageUrl: "/images/meeting_room1.jpeg" },
+  meeting_room_2: { label: "Meeting Room 2", imageUrl: "/images/meeting_room2.jpeg" },
+  podcast_studio: { label: "Podcast Studio", imageUrl: "/images/podcast_studio.jpeg" },
+  tiktok_studio: { label: "TikTok Studio", imageUrl: "/images/tiktok_studio.jpeg" },
 };
 
 type VoiceVisitor = {
@@ -65,25 +78,18 @@ type VoiceAssistantProps = {
    * doesn't have to re-identify themselves by voice too.
    */
   knownVisitor?: VoiceVisitor | null;
+  /**
+   * Called right after a brand-new visitor is registered by voice, to
+   * capture their face photos and save them via the same camera-capture +
+   * /api/kiosk/face-profile logic the manual kiosk flow uses (see
+   * page.tsx's captureFaceSamples + enrollFaceForVisitor). Awaited inside
+   * the register_visitor tool call itself -- since the agent doesn't
+   * generate its next reply until the tool returns, this naturally pauses
+   * the conversation while the photo is taken and saved. If omitted, voice
+   * registration completes without any face enrollment step.
+   */
+  onNeedFaceEnrollment?: (visitor: VoiceVisitor) => Promise<void>;
 };
-
-function float32ToInt16(float32Array: Float32Array): Int16Array {
-  const int16Array = new Int16Array(float32Array.length);
-  for (let i = 0; i < float32Array.length; i++) {
-    const s = Math.max(-1, Math.min(1, float32Array[i]));
-    int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return int16Array;
-}
-
-function int16ToFloat32(int16Array: Int16Array): Float32Array {
-  const float32Array = new Float32Array(int16Array.length);
-  for (let i = 0; i < int16Array.length; i++) {
-    const s = int16Array[i];
-    float32Array[i] = s < 0 ? s / 0x8000 : s / 0x7fff;
-  }
-  return float32Array;
-}
 
 // Mirrors normalize_phone_() in converse.py - always normalize before
 // calling the backend, in case it validates phone format strictly.
@@ -94,10 +100,11 @@ function normalizePhoneForBackend(phone: string): string {
   return `+971${cleaned}`;
 }
 
-export function VoiceAssistant({ open, onClose, knownVisitor }: VoiceAssistantProps) {
+export function VoiceAssistant({ open, onClose, knownVisitor, onNeedFaceEnrollment }: VoiceAssistantProps) {
   const [status, setStatus] = useState("idle");
   const [connected, setConnected] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [currentVisitor, setCurrentVisitor] = useState<VoiceVisitor | null>(knownVisitor ?? null);
   const [roomPreview, setRoomPreview] = useState<{ label: string; imageUrl: string } | null>(null);
@@ -107,9 +114,6 @@ export function VoiceAssistant({ open, onClose, knownVisitor }: VoiceAssistantPr
   // see the CURRENT value, not the value from whichever render created
   // the closure.
   const sessionRef = useRef<RealtimeSession | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
-  const micAudioContextRef = useRef<AudioContext | null>(null);
-  const micEnabledRef = useRef(false);
   const mutedRef = useRef(false);
   const currentVisitorRef = useRef<VoiceVisitor | null>(knownVisitor ?? null);
   const conversationEndedRef = useRef(false);
@@ -117,12 +121,18 @@ export function VoiceAssistant({ open, onClose, knownVisitor }: VoiceAssistantPr
   const cancelledResponseIdsRef = useRef<Set<string>>(new Set());
   const speechStartedAtRef = useRef<number | null>(null);
   const lineIdRef = useRef(0);
+  const onNeedFaceEnrollmentRef = useRef(onNeedFaceEnrollment);
+  useEffect(() => {
+    onNeedFaceEnrollmentRef.current = onNeedFaceEnrollment;
+  }, [onNeedFaceEnrollment]);
 
-  const playbackAudioContextRef = useRef<AudioContext | null>(null);
-  const nextPlayTimeRef = useRef(0);
-  const responseAudioStateRef = useRef<Map<string, { pending: number; done: boolean }>>(new Map());
-  const scheduledSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-  const awaitingPlaybackFinishRef = useRef(false);
+  // Rendered but not necessarily wired up to anything -- under WebRTC the
+  // SDK is expected to handle attaching/playing the remote audio track
+  // automatically. This element exists as a fallback attach point to
+  // inspect/use if audio turns out to be silent after connecting; see the
+  // NOTE in connect() below.
+  const audioElementRef = useRef<HTMLAudioElement | null>(null);
+  const closingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function appendLine(kind: TranscriptLine["kind"], text: string) {
     lineIdRef.current += 1;
@@ -142,151 +152,22 @@ export function VoiceAssistant({ open, onClose, knownVisitor }: VoiceAssistantPr
     setCurrentVisitor(visitor);
   }
 
-  // --- Playback bookkeeping ---------------------------------------------
-
-  function getResponseState(responseId: string | undefined) {
-    const key = responseId ?? "__unknown__";
-    const map = responseAudioStateRef.current;
-    if (!map.has(key)) {
-      map.set(key, { pending: 0, done: false });
-    }
-    return map.get(key)!;
-  }
-
-  function allResponsesFinished(): boolean {
-    for (const state of responseAudioStateRef.current.values()) {
-      if (!state.done || state.pending > 0) return false;
-    }
-    return true;
-  }
-
-  function playPCM16Chunk(arrayBuffer: ArrayBuffer, responseId: string | undefined) {
-    const ctx = playbackAudioContextRef.current;
-    if (!ctx) return;
-    const int16 = new Int16Array(arrayBuffer);
-    const float32 = int16ToFloat32(int16);
-
-    const audioBuffer = ctx.createBuffer(1, float32.length, PCM_SAMPLE_RATE);
-    audioBuffer.copyToChannel(float32 as Float32Array<ArrayBuffer>, 0);
-
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-
-    const startAt = Math.max(nextPlayTimeRef.current, ctx.currentTime);
-    source.start(startAt);
-    nextPlayTimeRef.current = startAt + audioBuffer.duration;
-
-    const state = getResponseState(responseId);
-    state.pending++;
-    scheduledSourcesRef.current.add(source);
-
-    source.onended = () => {
-      scheduledSourcesRef.current.delete(source);
-      state.pending = Math.max(0, state.pending - 1);
-      if (allResponsesFinished()) {
-        onPlaybackFullyFinished();
-      }
-    };
-  }
-
-  // Cuts off every chunk currently queued or playing, right now, instead
-  // of letting already-scheduled Web Audio buffers run to completion
-  // underneath an interruption.
-  function flushQueuedPlayback() {
-    for (const source of scheduledSourcesRef.current) {
-      source.onended = null;
-      try {
-        source.stop();
-      } catch {
-        // Already stopped or never started - fine either way.
-      }
-    }
-    scheduledSourcesRef.current.clear();
-    if (playbackAudioContextRef.current) {
-      nextPlayTimeRef.current = playbackAudioContextRef.current.currentTime;
-    }
-    responseAudioStateRef.current.clear();
-  }
-
-  function onPlaybackFullyFinished() {
-    if (!awaitingPlaybackFinishRef.current) return;
-    awaitingPlaybackFinishRef.current = false;
-    responseAudioStateRef.current.clear();
-    resumeAfterAssistantAudio();
-  }
-
   function resumeAfterAssistantAudio() {
     if (conversationEndedRef.current) {
-      micEnabledRef.current = false;
-      appendToolLog("goodbye finished playing - stopping and disconnecting");
-      setStatus("conversation ended - mic stopped");
-      performDisconnect();
+      appendToolLog(
+        `goodbye finished generating - waiting ~${CLOSING_LINE_SPEECH_MS}ms for playback to catch up before disconnecting`,
+      );
+      setStatus("saying goodbye…");
+      closingTimeoutRef.current = setTimeout(() => {
+        closingTimeoutRef.current = null;
+        appendToolLog("goodbye playback should be done - disconnecting");
+        setStatus("conversation ended");
+        performDisconnect();
+      }, CLOSING_LINE_SPEECH_MS);
       return;
     }
-    // Barge-in: the mic was never turned off for this response in the
-    // first place, so there's nothing to re-enable here.
     turnAwaitingUserRef.current = true;
     setStatus(mutedRef.current ? "muted - assistant done talking" : "connected - your turn to talk");
-  }
-
-  // --- Mic capture --------------------------------------------------------
-
-  async function setupMicCapture(activeSession: RealtimeSession) {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
-    micStreamRef.current = stream;
-    const audioTrack = stream.getAudioTracks()[0];
-    appendToolLog(`mic device in use: "${audioTrack?.label || "(no label - permission may be limited)"}"`);
-    const ctx = new AudioContext({ sampleRate: PCM_SAMPLE_RATE });
-    micAudioContextRef.current = ctx;
-    appendToolLog(`mic AudioContext actual sampleRate: ${ctx.sampleRate} (requested ${PCM_SAMPLE_RATE})`);
-    await ctx.audioWorklet.addModule("/pcm-recorder-worklet.js");
-
-    const micSource = ctx.createMediaStreamSource(stream);
-    const workletNode = new AudioWorkletNode(ctx, "pcm-recorder-processor");
-
-    let sentChunkCount = 0;
-    workletNode.port.onmessage = (event: MessageEvent<Float32Array>) => {
-      if (!micEnabledRef.current) return;
-      const int16 = float32ToInt16(event.data);
-      try {
-        activeSession.sendAudio(int16.buffer as ArrayBuffer);
-        sentChunkCount++;
-        // Log every 50th chunk (~roughly once a second) so we can SEE in
-        // the transcript that mic audio is actually being captured and
-        // sent, without flooding the log on every single 128-sample frame.
-        if (sentChunkCount === 1 || sentChunkCount % 50 === 0) {
-          let peak = 0;
-          for (let i = 0; i < event.data.length; i++) {
-            const abs = Math.abs(event.data[i]);
-            if (abs > peak) peak = abs;
-          }
-          appendToolLog(
-            `mic chunk #${sentChunkCount} sent (${int16.length} samples, peak amplitude ${peak.toFixed(4)})`
-          );
-        }
-      } catch (err) {
-        appendToolLog(`sendAudio failed: ${err}`);
-        console.error("sendAudio failed:", err);
-      }
-    };
-
-    // Deliberately NOT connecting workletNode to ctx.destination - we
-    // don't want to hear our own mic played back locally.
-    micSource.connect(workletNode);
-  }
-
-  function teardownMicCapture() {
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((t) => t.stop());
-      micStreamRef.current = null;
-    }
-    if (micAudioContextRef.current) {
-      micAudioContextRef.current.close().catch(() => {});
-      micAudioContextRef.current = null;
-    }
   }
 
   // --- Backend calls --------------------------------------------------------
@@ -373,7 +254,10 @@ export function VoiceAssistant({ open, onClose, knownVisitor }: VoiceAssistantPr
         "Register a new visitor with their full name, phone number, visitor type, and email. " +
         "Only call this once you have all four - full name, whether they're a visitor or a " +
         "client, their email, and their phone number - and they've told you this is their " +
-        "first time / they're not an existing customer.",
+        "first time / they're not an existing customer. This may also silently capture a photo " +
+        "for face recognition on future visits -- if the result includes " +
+        "face_photo_saved: true, briefly mention in your next reply that you've saved their " +
+        "photo so the kiosk will recognize them next time.",
       parameters: z.object({
         full_name: z.string(),
         mobile_number: z.string(),
@@ -400,7 +284,33 @@ export function VoiceAssistant({ open, onClose, knownVisitor }: VoiceAssistantPr
           if (res.status === 201 && body?.data) {
             updateCurrentVisitor(body.data);
             appendToolLog(`registered: ${body.data.visitor_name} (visitor_id ${body.data.visitor_id})`);
-            return JSON.stringify({ registered: true, visitor: body.data });
+
+            // Pause here for face capture, if the parent page wired it up.
+            // The agent won't generate its next spoken reply until this
+            // tool call returns, so awaiting this IS the pause -- no
+            // separate state machine needed. See the prop's doc comment
+            // for the honest limitation: the agent can't say "look at the
+            // camera" mid-pause, only confirm it's done afterward.
+            if (onNeedFaceEnrollmentRef.current) {
+              appendToolLog("capturing face photo for enrollment…");
+              setStatus("registered — capturing your photo, please look at the camera…");
+              try {
+                await onNeedFaceEnrollmentRef.current(body.data);
+                appendToolLog("face photo saved");
+              } catch (enrollErr) {
+                // Non-fatal: registration itself already succeeded. Log it
+                // and let the model's reply proceed without mentioning a
+                // saved photo, rather than failing the whole registration.
+                appendToolLog(`face enrollment failed (registration still saved): ${enrollErr}`);
+              }
+              setStatus("assistant speaking…");
+            }
+
+            return JSON.stringify({
+              registered: true,
+              visitor: body.data,
+              face_photo_saved: Boolean(onNeedFaceEnrollmentRef.current),
+            });
           }
           if (res.status === 409) {
             appendToolLog("conflict: phone already registered - should call lookup_visitor instead");
@@ -512,9 +422,10 @@ export function VoiceAssistant({ open, onClose, knownVisitor }: VoiceAssistantPr
     const endConversationTool = tool({
       name: "end_conversation",
       description:
-        "Call this once the visitor has clearly said they're finished and you're saying (or have " +
-        "just said) your goodbye. This stops the assistant from listening for anything further - " +
-        "only call it when the conversation is genuinely over, never mid-conversation.",
+        "Call this ONLY after you have already spoken the full mandatory closing line word-for-word " +
+        "(see 'Ending the call' in your instructions). Never call it before or while still speaking " +
+        "that line, and never call it mid-conversation - only once the visitor is clearly finished " +
+        "and the complete closing line has already been said out loud.",
       parameters: z.object({}),
       async execute() {
         appendToolLog("end_conversation called - will stop listening once goodbye finishes playing");
@@ -585,7 +496,12 @@ you're not sure and suggest reception:
 ${knowledgeBase}
 
 After completing a real task, ask if there's anything else. For a plain question, just answer it.
-Only say goodbye when they clearly say they're finished, and when you do, call end_conversation.
+
+**Ending the call.** Only once the visitor clearly says they're finished:
+1. Say this exact closing line, word-for-word, as ONE line - never shorten it, paraphrase it, split
+   it up, or replace it with a shorter goodbye like "alright" or "bye": "${CLOSING_LINE}"
+2. Only after that entire line has been spoken out loud, call end_conversation. Never call it
+   before or during that line.
 
 **Keep every reply short - this is a voice conversation, not an essay.** One short sentence for most
 turns; two at most for a list of facts they specifically asked for. If you catch yourself about to
@@ -624,18 +540,38 @@ Be warm and professional, but brief - always.
 
       const session = new RealtimeSession(agent, {
         model: "gpt-realtime-2.1",
-        transport: new OpenAIRealtimeWebSocket(),
+        transport: new OpenAIRealtimeWebRTC(),
         config: {
           outputModalities: ["audio"],
           reasoning: { effort: "low" },
           audio: {
             input: {
               format: "pcm16",
+              // NOTE: not confirmed against current OpenAI Realtime API
+              // docs for this exact SDK version/model -- this is meant to
+              // suppress background/distant voices, tuned for a visitor
+              // standing close to a kiosk mic (as opposed to "far_field",
+              // meant for a mic across a room). If this causes a connection
+              // error, it's the first thing to remove.
+              noiseReduction: { type: "near_field" },
               turnDetection: {
                 type: "server_vad",
-                threshold: 0.4,
+                // Raised back up from the 0.4 used while diagnosing a dead
+                // mic -- now that the mic itself is confirmed working, a
+                // higher threshold requires louder/closer speech to trigger,
+                // which is exactly what filters out other people talking
+                // nearby. Retune if it's still too sensitive (try 0.7) or
+                // starts missing your own quieter speech (try 0.5).
+                threshold: 0.6,
                 prefixPaddingMs: 300,
-                silenceDurationMs: 600,
+                // One more conservative step down from 500ms. Test with
+                // normal fluent sentences (not digit-by-digit numbers,
+                // which is what broke 280ms earlier) -- if a mid-sentence
+                // pause starts getting cut off again, go back to 500. Set
+                // realistic expectations either way: a meaningful chunk of
+                // remaining delay is the model's own thinking + speech
+                // generation time, which no value here can remove.
+                silenceDurationMs: 400,
                 createResponse: false,
                 interruptResponse: true,
               },
@@ -691,11 +627,12 @@ Be warm and professional, but brief - always.
         });
       });
 
+      // Simplified from the WebSocket version -- there's no manual chunk
+      // queue to flush anymore, the SDK/browser owns audio playback.
       session.on("audio_interrupted", () => {
-        flushQueuedPlayback();
-        awaitingPlaybackFinishRef.current = false;
-        appendToolLog("audio_interrupted - flushed queued playback");
+        appendToolLog("audio_interrupted");
         setStatus("interrupted - listening…");
+        setIsUserSpeaking(false);
         resumeAfterAssistantAudio();
       });
 
@@ -732,29 +669,18 @@ Be warm and professional, but brief - always.
         setStatus("error - check browser console");
       });
 
-      session.on("audio", (event: any) => {
-        if (cancelledResponseIdsRef.current.has(event?.responseId)) return;
-        const chunk = event?.data ?? event?.audio ?? event?.buffer ?? event?.chunk ?? event;
-        const usable = chunk instanceof ArrayBuffer || ArrayBuffer.isView(chunk);
-        if (usable) {
-          playPCM16Chunk(chunk instanceof ArrayBuffer ? chunk : (chunk.buffer as ArrayBuffer), event?.responseId);
-        }
-      });
-
       setStatus("connecting…");
+      // NOTE: under WebRTC, this should trigger the browser's own mic
+      // permission prompt and set up the peer connection automatically. If
+      // connection succeeds but you hear NOTHING when the assistant
+      // replies, that's the single most likely thing to have gone wrong --
+      // the remote audio track may need to be manually attached to
+      // audioElementRef.current instead of relying on automatic playback.
+      // Check the browser console for any WebRTC/ICE errors first.
       await session.connect({ apiKey: fetchEphemeralKey });
-
-      setStatus("setting up microphone…");
-      playbackAudioContextRef.current = new AudioContext({ sampleRate: PCM_SAMPLE_RATE });
-      nextPlayTimeRef.current = playbackAudioContextRef.current.currentTime;
-      await setupMicCapture(session);
 
       setStatus("connected - greeting…");
       setConnected(true);
-
-      // Barge-in: mic stays live from connect through every response -
-      // the only things that turn it off are manual mute and disconnect.
-      micEnabledRef.current = true;
       mutedRef.current = false;
       setMuted(false);
 
@@ -770,24 +696,24 @@ Be warm and professional, but brief - always.
             } catch (err) {
               console.error("Could not cancel unrequested response:", err);
             }
-            getResponseState(responseId).done = true;
             return;
           }
           setStatus("assistant speaking…");
-          awaitingPlaybackFinishRef.current = true;
-          getResponseState(responseId);
         } else if (event?.type === "response.done") {
-          const responseId = event?.response?.id;
-          const state = getResponseState(responseId);
-          state.done = true;
-          if (allResponsesFinished()) {
-            onPlaybackFullyFinished();
-          }
+          // Simplified from the WebSocket version's pending-chunk tracking
+          // -- response.done is used directly as "assistant's turn is
+          // over" under WebRTC, since we no longer see individual audio
+          // chunks to count. This may flip back to "your turn" slightly
+          // before trailing audio finishes playing; if that causes the
+          // visitor's next utterance to get missed at the very start,
+          // that's the trade-off to know about.
+          resumeAfterAssistantAudio();
         } else if (event?.type === "input_audio_buffer.speech_started") {
           speechStartedAt = performance.now();
           speechStartedAtRef.current = speechStartedAt;
-          appendToolLog("speech_started detected by VAD");
+          setIsUserSpeaking(true);
         } else if (event?.type === "input_audio_buffer.speech_stopped") {
+          setIsUserSpeaking(false);
           const startedAt = speechStartedAtRef.current;
           const durationMs = startedAt === null ? Infinity : performance.now() - startedAt;
           speechStartedAtRef.current = null;
@@ -821,32 +747,41 @@ Be warm and professional, but brief - always.
   }, [knownVisitor]);
 
   function performDisconnect() {
+    if (closingTimeoutRef.current) {
+      clearTimeout(closingTimeoutRef.current);
+      closingTimeoutRef.current = null;
+    }
     const session = sessionRef.current as any;
     session?.close?.() ?? session?.disconnect?.();
     sessionRef.current = null;
-    teardownMicCapture();
-    if (playbackAudioContextRef.current) {
-      playbackAudioContextRef.current.close().catch(() => {});
-      playbackAudioContextRef.current = null;
-    }
-    awaitingPlaybackFinishRef.current = false;
-    responseAudioStateRef.current.clear();
-    scheduledSourcesRef.current.clear();
     cancelledResponseIdsRef.current.clear();
     updateCurrentVisitor(null);
     conversationEndedRef.current = false;
     setRoomPreview(null);
     setConnected(false);
     setMuted(false);
+    setIsUserSpeaking(false);
   }
 
   function handleToggleMute() {
     if (!sessionRef.current) return;
     const next = !mutedRef.current;
     mutedRef.current = next;
-    micEnabledRef.current = !next;
     setMuted(next);
     setStatus(next ? "muted" : "connected - just start talking");
+    if (next) setIsUserSpeaking(false);
+    // ASSUMPTION: RealtimeSession exposes a mute() method for WebRTC mode,
+    // since we no longer have direct access to the mic stream/track
+    // ourselves. If muting doesn't actually silence the mic (check the
+    // browser's mic-active indicator), this method name needs correcting
+    // against the actual SDK -- likely candidates: session.mute(),
+    // session.transport.mute(), or toggling .enabled on a track exposed
+    // somewhere on the session/transport object.
+    try {
+      (sessionRef.current as any)?.mute?.(next);
+    } catch (err) {
+      console.error("session.mute() failed or doesn't exist:", err);
+    }
   }
 
   function handleDisconnect() {
@@ -882,76 +817,148 @@ Be warm and professional, but brief - always.
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-6">
-      <div className="w-full max-w-lg rounded-md border border-cyan/30 bg-panel p-6 shadow-2xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-cyan">Voice assistance</p>
-            <h2 className="mt-2 text-2xl font-semibold">{status}</h2>
-            {currentVisitor ? (
-              <p className="mt-1 text-sm text-white/60">
-                Signed in as {currentVisitor.visitor_name} ({currentVisitor.visitor_type})
-              </p>
-            ) : null}
-          </div>
-          <button
-            aria-label="Close voice assistance"
-            className="grid h-10 w-10 place-items-center rounded-md border border-white/15 bg-white/8"
-            onClick={handleDisconnect}
-            title="Close"
-            type="button"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        {roomPreview ? (
-          <div className="mt-4 overflow-hidden rounded-md" style={{ aspectRatio: "16/9", maxHeight: "220px" }}>
-            <img
-              key={roomPreview.imageUrl}
-              alt={roomPreview.label}
-              src={roomPreview.imageUrl}
-              className="h-full w-full object-cover"
-              style={{ animation: "voice-room-fade-in 0.4s ease" }}
-            />
-            <p className="mt-2 text-center text-sm text-white/60">{roomPreview.label}</p>
-          </div>
-        ) : null}
-
-        <div className="mt-4 max-h-64 space-y-1 overflow-y-auto rounded-md border border-white/10 bg-white/5 p-3 text-sm">
-          {transcript.length === 0 ? (
-            <p className="text-white/40">Say hello to get started…</p>
-          ) : (
-            transcript.map((line) => (
-              <p
-                key={line.id}
-                className={
-                  line.kind === "tool"
-                    ? "italic text-white/40"
-                    : line.kind === "user"
-                      ? "text-cyan"
-                      : "text-white"
-                }
-              >
-                {line.kind === "tool" ? line.text : `${line.kind === "user" ? "You" : "Assistant"}: ${line.text}`}
-              </p>
-            ))
-          )}
-        </div>
-
-        <div className="mt-6 flex gap-3">
-          <KioskButton className="flex-1" onClick={handleToggleMute} variant="secondary">
-            {muted ? "Unmute" : "Mute"}
-          </KioskButton>
-          <KioskButton className="flex-1" onClick={handleDisconnect} variant="ghost">
-            End Conversation
-          </KioskButton>
-        </div>
+    <div className="absolute inset-0 z-50 flex flex-col overflow-y-auto bg-ink px-7 py-6 text-white">
+      <div className="flex flex-shrink-0 items-start justify-between gap-4">
+        {currentVisitor ? (
+          <p className="text-sm text-white/60">
+            Signed in as {currentVisitor.visitor_name} ({currentVisitor.visitor_type})
+          </p>
+        ) : (
+          <span />
+        )}
+        <button
+          aria-label="Close voice assistance"
+          className="grid h-10 w-10 place-items-center rounded-md border border-white/15 bg-white/8"
+          onClick={handleDisconnect}
+          title="Close"
+          type="button"
+        >
+          <X className="h-5 w-5" />
+        </button>
       </div>
+
+      {roomPreview ? (
+        <div className="mt-4 flex-shrink-0 overflow-hidden rounded-md" style={{ aspectRatio: "16/9", maxHeight: "220px" }}>
+          <img
+            key={roomPreview.imageUrl}
+            alt={roomPreview.label}
+            src={roomPreview.imageUrl}
+            className="h-full w-full object-cover"
+            style={{ animation: "voice-room-fade-in 0.4s ease" }}
+          />
+          <p className="mt-2 text-center text-sm text-white/60">{roomPreview.label}</p>
+        </div>
+      ) : null}
+
+      <div className="flex flex-1 flex-col items-center justify-center gap-5">
+        <span className="inline-flex items-center gap-2 rounded-full border border-cyan/40 bg-cyan/10 px-4 py-1.5 text-xs font-bold uppercase tracking-[0.16em] text-cyan">
+          <span className="h-1.5 w-1.5 rounded-full bg-cyan voice-badge-dot" />
+          AI Voice Assistant
+        </span>
+
+        <h2 className="text-center text-2xl font-semibold leading-snug sm:text-3xl">
+          {muted
+            ? "Microphone muted"
+            : isUserSpeaking
+              ? "I'm listening…"
+              : status === "assistant speaking…"
+                ? "Speaking…"
+                : "I'm listening…"}
+          <br />
+          <span className="text-white/60">
+            {muted ? "Tap the mic to unmute." : "You can speak now."}
+          </span>
+        </h2>
+
+        <button
+          aria-label={muted ? "Unmute microphone" : "Mute microphone"}
+          aria-pressed={muted}
+          className={[
+            "voice-fab-wrap",
+            muted ? "voice-fab-wrap--muted" : isUserSpeaking ? "voice-fab-wrap--user" : status === "assistant speaking…" ? "voice-fab-wrap--assistant" : "",
+          ].join(" ")}
+          onClick={handleToggleMute}
+          type="button"
+        >
+          <span className="voice-fab voice-fab--large">
+            {!muted && (isUserSpeaking || status === "assistant speaking…") ? (
+              <>
+                <span className="voice-ring" style={{ animationDelay: "0s" }} />
+                <span className="voice-ring" style={{ animationDelay: "0.5s" }} />
+              </>
+            ) : null}
+            {muted ? <MicOff /> : <Mic className={isUserSpeaking ? "voice-mic-active" : ""} />}
+          </span>
+        </button>
+
+        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-white/50">
+          {muted
+            ? ""
+            : isUserSpeaking
+              ? "Go ahead, we can hear you"
+              : status === "assistant speaking…"
+                ? "Assistant speaking"
+                : "Tap the mic to mute"}
+        </p>
+      </div>
+
+      <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border border-white/10 bg-white/5 p-3 text-sm">
+        {transcript.length === 0 ? (
+          <p className="text-white/40">Say hello to get started…</p>
+        ) : (
+          transcript.map((line) => (
+            <p
+              key={line.id}
+              className={
+                line.kind === "tool"
+                  ? "italic text-white/40"
+                  : line.kind === "user"
+                    ? "text-cyan"
+                    : "text-white"
+              }
+            >
+              {line.kind === "tool" ? line.text : `${line.kind === "user" ? "You" : "Assistant"}: ${line.text}`}
+            </p>
+          ))
+        )}
+      </div>
+
+      <KioskButton className="mt-4 flex-shrink-0" onClick={handleDisconnect} variant="ghost">
+        End Conversation
+      </KioskButton>
+
+      {/* Fallback attach point for the remote audio track -- see the
+          NOTE in connect(). Hidden since it's only a safety net. */}
+      <audio autoPlay ref={audioElementRef} style={{ display: "none" }} />
       <style jsx>{`
         @keyframes voice-room-fade-in {
           from { opacity: 0; }
           to { opacity: 1; }
+        }
+        @keyframes voice-ring-pulse {
+          0% { transform: scale(0.75); opacity: 0.65; }
+          100% { transform: scale(1.7); opacity: 0; }
+        }
+        .voice-ring {
+          position: absolute;
+          inset: 0;
+          border-radius: 9999px;
+          border: 2px solid currentColor;
+          animation: voice-ring-pulse 1.3s ease-out infinite;
+        }
+        @keyframes voice-mic-pulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.18); }
+        }
+        .voice-mic-active {
+          animation: voice-mic-pulse 0.5s ease-in-out infinite;
+        }
+        @keyframes voice-badge-pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.35; }
+        }
+        .voice-badge-dot {
+          animation: voice-badge-pulse 1.6s ease-in-out infinite;
         }
       `}</style>
     </div>

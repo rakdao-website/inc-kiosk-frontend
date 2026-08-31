@@ -4,21 +4,34 @@ import type { FormEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BriefcaseBusiness,
+  CalendarCheck2,
   CalendarDays,
   Check,
   CircleHelp,
   ClipboardList,
+  Cloud,
+  CloudFog,
+  CloudLightning,
+  CloudRain,
+  CloudSnow,
+  Headset,
   Home,
   KeyRound,
+  MapPin,
   Mic,
   Podcast,
+  RotateCcw,
   ShieldCheck,
   Sparkles,
+  Sun,
+  User,
   UserRoundPlus,
   Video,
 } from "lucide-react";
 import { ApiRequestError, requestJson } from "@/lib/api";
 import { VoiceAssistant } from "@/components/kiosk/VoiceAssistant";
+import { SignalConstellation } from "@/components/kiosk/Signalconstellation";
+import { LivingBlobMesh } from "@/components/kiosk/LivingBlobMesh";
 import {
   isBookableService,
   nextStepAfterRecognition,
@@ -411,6 +424,31 @@ export default function KioskPage() {
     setStep("register");
   }
 
+  function handleFaceCheckContinueAsVisitor() {
+    // No separate anonymous/guest-visitor concept exists in this flow yet --
+    // this reuses the same manual name+phone lookup as the "Face Not
+    // Recognized" path, which is the closest existing equivalent to
+    // "continue without confirming a face match."
+    setFacecheckSuggestions(null);
+    setScanState("idle");
+    setError(null);
+    setStep("profile-lookup");
+  }
+
+  function handleFaceCheckRescan() {
+    setFacecheckSuggestions(null);
+    setScanState("idle");
+    setError(null);
+    handleFaceScan();
+  }
+
+  function handleFaceCheckSupport() {
+    setFacecheckSuggestions(null);
+    setScanState("idle");
+    setError(null);
+    setStep("other");
+  }
+
   async function handleProfileLookup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -593,6 +631,27 @@ export default function KioskPage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Narrower than enrollFaceForVisitor above: just captures + saves a face
+  // photo, without navigating the page or creating a session -- called
+  // from inside the voice assistant's register_visitor tool, where the
+  // visitor could be on any screen and the voice conversation should just
+  // continue afterward, not redirect them anywhere.
+  async function handleVoiceFaceEnrollment(voiceVisitor: { visitor_id: number; visitor_name: string; visitor_type: string }) {
+    const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT);
+    await requestJson<FaceProfileResult>("/api/kiosk/face-profile", {
+      method: "POST",
+      body: JSON.stringify({
+        visitor_id: voiceVisitor.visitor_id,
+        images_base64: images,
+      }),
+    });
+    // Reflect the newly registered + enrolled visitor in the page's own
+    // state too, so the underlying kiosk screen (and any later reconnect
+    // to voice assistance) already knows who they are.
+    const fullVisitor = await requestJson<Visitor>(`/api/kiosk/visitors/${voiceVisitor.visitor_id}`);
+    setVisitor(fullVisitor);
   }
 
   async function retryFaceEnrollment() {
@@ -780,6 +839,8 @@ export default function KioskPage() {
     <main className="min-h-screen bg-[#efefef] text-white">
       <section className="mx-auto grid min-h-screen place-items-center">
         <div className="kiosk-frame">
+          <LivingBlobMesh />
+          {/* <SignalConstellation /> — swap back by using this instead */}
           <TopBar />
           <div className="kiosk-content">
             {error ? <StatusBanner tone="error" message={error} /> : null}
@@ -826,7 +887,6 @@ export default function KioskPage() {
                       }
                     />
                   </Panel>
-                  <PageVoiceButton onClick={() => setVoiceOpen(true)} />
                   <PrimaryButton disabled={busy} type="submit">Continue</PrimaryButton>
                   <p className="inline-note">
                     Don't have an account?{" "}
@@ -890,7 +950,6 @@ export default function KioskPage() {
                       </div>
                     </div>
                   </Panel>
-                  <PageVoiceButton onClick={() => setVoiceOpen(true)} />
                   <div className="screen-actions two">
                     <OutlineButton onClick={() => setStep("profile-lookup")} type="button">Back</OutlineButton>
                     <PrimaryButton disabled={busy} type="submit">Continue</PrimaryButton>
@@ -981,7 +1040,6 @@ export default function KioskPage() {
                 <PrimaryButton onClick={() => setStep(currentBookings.length > 0 ? "thank-you" : "service-selection")}>
                   Finish
                 </PrimaryButton>
-                <PageVoiceButton onClick={() => setVoiceOpen(true)} />
                 <OutlineButton onClick={() => setStep("service-selection")}>Other Services</OutlineButton>
               </Screen>
             ) : null}
@@ -1080,7 +1138,6 @@ export default function KioskPage() {
                     placeholder="Add any details we should remember for next time"
                     value={otherNotes}
                   />
-                  <PageVoiceButton onClick={() => setVoiceOpen(true)} />
                   <PrimaryButton disabled={busy} type="submit">Submit and Continue to CX Team</PrimaryButton>
                   <OutlineButton onClick={() => setStep("service-selection")} type="button">Back</OutlineButton>
                 </form>
@@ -1098,17 +1155,27 @@ export default function KioskPage() {
             ) : null}
           </div>
           <FooterHelp />
+          <BottomNav
+            onFindAPlace={() => {
+              // Still no wayfinding/directory feature to route to -- see
+              // note from earlier. Flagging rather than faking it.
+              console.warn("Find a Place: no destination wired up yet.");
+            }}
+            onPlanVisit={() => setStep("service-selection")}
+            onVoiceAssistant={() => setVoiceOpen(true)}
+          />
+          <VoiceAssistant
+            open={voiceOpen}
+            onClose={() => setVoiceOpen(false)}
+            knownVisitor={
+              visitor
+                ? { visitor_id: visitor.visitor_id, visitor_name: visitor.visitor_name, visitor_type: visitor.visitor_type }
+                : null
+            }
+            onNeedFaceEnrollment={handleVoiceFaceEnrollment}
+          />
         </div>
       </section>
-      <VoiceAssistant
-        open={voiceOpen}
-        onClose={() => setVoiceOpen(false)}
-        knownVisitor={
-          visitor
-            ? { visitor_id: visitor.visitor_id, visitor_name: visitor.visitor_name, visitor_type: visitor.visitor_type }
-            : null
-        }
-      />
 
       {facecheckSuggestions ? (
         <div className="voice-modal confirmation-modal">
@@ -1143,9 +1210,47 @@ export default function KioskPage() {
                 </button>
               ))}
             </div>
-            <OutlineButton disabled={busy} onClick={handleFaceCheckRespond}>
-              None of these — Continue to Registration
-            </OutlineButton>
+            <div className="suggestion-divider">
+              <span>None of these?</span>
+            </div>
+            <div className="suggestion-fallback-grid">
+              <button
+                className="suggestion-fallback-option"
+                disabled={busy}
+                onClick={handleFaceCheckContinueAsVisitor}
+                type="button"
+              >
+                <span className="suggestion-fallback-icon"><User className="h-4 w-4" /></span>
+                <span>Continue as Visitor</span>
+              </button>
+              <button
+                className="suggestion-fallback-option"
+                disabled={busy}
+                onClick={handleFaceCheckRespond}
+                type="button"
+              >
+                <span className="suggestion-fallback-icon"><UserRoundPlus className="h-4 w-4" /></span>
+                <span>Create New Profile</span>
+              </button>
+              <button
+                className="suggestion-fallback-option"
+                disabled={busy}
+                onClick={handleFaceCheckRescan}
+                type="button"
+              >
+                <span className="suggestion-fallback-icon"><RotateCcw className="h-4 w-4" /></span>
+                <span>Scan My Face Again</span>
+              </button>
+              <button
+                className="suggestion-fallback-option"
+                disabled={busy}
+                onClick={handleFaceCheckSupport}
+                type="button"
+              >
+                <span className="suggestion-fallback-icon"><Headset className="h-4 w-4" /></span>
+                <span>Talk to Support</span>
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
@@ -1164,12 +1269,83 @@ export default function KioskPage() {
   );
 }
 
+const RAK_LATITUDE = 25.7895;
+const RAK_LONGITUDE = 55.9432;
+
+// https://open-meteo.com/en/docs -- WMO weather codes, grouped loosely.
+function weatherIconFor(code: number | null) {
+  if (code === null) return Sun;
+  if (code === 0 || code === 1) return Sun;
+  if (code === 2 || code === 3) return Cloud;
+  if (code === 45 || code === 48) return CloudFog;
+  if (code >= 51 && code <= 67) return CloudRain;
+  if (code >= 71 && code <= 86) return CloudSnow;
+  if (code >= 95) return CloudLightning;
+  return Cloud;
+}
+
 function TopBar() {
+  const [now, setNow] = useState(() => new Date());
+  const [tempC, setTempC] = useState<number | null>(null);
+  const [weatherCode, setWeatherCode] = useState<number | null>(null);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 15_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadWeather() {
+      try {
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${RAK_LATITUDE}&longitude=${RAK_LONGITUDE}&current=temperature_2m,weather_code&timezone=Asia%2FDubai`;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`weather request failed: ${response.status}`);
+        const data = await response.json();
+        if (cancelled) return;
+        setTempC(Math.round(data?.current?.temperature_2m ?? NaN));
+        setWeatherCode(data?.current?.weather_code ?? null);
+      } catch (err) {
+        console.error("Could not load weather:", err);
+      }
+    }
+
+    loadWeather();
+    const id = setInterval(loadWeather, 30 * 60_000); // refresh every 30 min
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  const WeatherIcon = weatherIconFor(weatherCode);
+  const weekday = now.toLocaleDateString("en-US", { weekday: "long" }).toUpperCase();
+  const monthDay = now.toLocaleDateString("en-US", { month: "long", day: "numeric" }).toUpperCase();
+  const time = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+
   return (
     <header className="top-bar">
+      <div className="top-bar-weather">
+        <WeatherIcon className="top-bar-weather-icon" />
+        <div>
+          <p className="top-bar-weather-temp">{Number.isFinite(tempC) ? `${tempC}°C` : "—"}</p>
+          <p className="top-bar-weather-location">RAK, UAE</p>
+        </div>
+      </div>
+
       <div className="brand">
         <img alt="Innovation City logo" src="/brand/innovation-city-mark.png" />
         <span>INNOVATION CITY</span>
+      </div>
+
+      <div className="top-bar-clock">
+        <p className="top-bar-clock-time">{time}</p>
+        <p className="top-bar-clock-date">
+          {weekday}
+          <br />
+          {monthDay}
+        </p>
       </div>
     </header>
   );
@@ -1181,6 +1357,35 @@ function FooterHelp() {
       <p>Please ask an Innovation Hub associate if you require assistance.</p>
       <span />
     </footer>
+  );
+}
+
+function BottomNav({
+  onPlanVisit,
+  onVoiceAssistant,
+  onFindAPlace,
+}: {
+  onPlanVisit: () => void;
+  onVoiceAssistant: () => void;
+  onFindAPlace: () => void;
+}) {
+  return (
+    <nav className="bottom-nav">
+      <button className="bottom-nav-btn" onClick={onPlanVisit} type="button">
+        <CalendarCheck2 />
+        <span>Plan Your Visit</span>
+      </button>
+
+      <button className="bottom-nav-btn" onClick={onVoiceAssistant} type="button">
+        <Mic />
+        <span>Voice Assistant</span>
+      </button>
+
+      <button className="bottom-nav-btn" onClick={onFindAPlace} type="button">
+        <MapPin />
+        <span>Find a Place</span>
+      </button>
+    </nav>
   );
 }
 
@@ -1270,15 +1475,6 @@ function TextAreaField({
         <textarea {...props} />
       </div>
     </label>
-  );
-}
-
-function PageVoiceButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button className="page-voice-btn" onClick={onClick} type="button">
-      <Mic />
-      <span>Use Voice Assistance</span>
-    </button>
   );
 }
 

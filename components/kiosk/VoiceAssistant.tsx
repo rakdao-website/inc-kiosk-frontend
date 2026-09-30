@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC, tool, backgroundResult } from "@openai/agents/realtime";
 import { z } from "zod";
-import { X } from "lucide-react";
-import { KioskButton } from "./KioskButton";
+import { Mic, MicOff, PhoneOff } from "lucide-react";
+import type { SkyState } from "./SkyFace";
 
 // With barge-in enabled, the mic stays live even while the assistant is
 // talking - which means its own voice bleeding back in (no headphones, or
@@ -69,6 +69,19 @@ type VoiceAssistantProps = {
    * registration completes without any face enrollment step.
    */
   onNeedFaceEnrollment?: (visitor: VoiceVisitor) => Promise<void>;
+  /**
+   * Called live as the visitor says each registration detail, so the
+   * visible form fills in with the conversation (page.tsx already passes
+   * this -- it was missing from this component's props before).
+   */
+  onFormFieldUpdate?: (fields: {
+    full_name?: string;
+    mobile_number?: string;
+    email?: string;
+    visitor_type?: "visitor" | "client";
+  }) => void;
+  /** Drives Sky in the bottom bar: off / connecting / idle / listening / speaking. */
+  onSkyStateChange?: (state: SkyState) => void;
 };
 
 // Mirrors normalize_phone_() in converse.py - always normalize before
@@ -80,114 +93,14 @@ function normalizePhoneForBackend(phone: string): string {
   return `+971${cleaned}`;
 }
 
-// Sky's face, driven by voiceState. Mouth region positioning (top/left/
-// width/height percentages, viewBox, and the 28-72 horizontal span) is
-// measured directly from the source art and corrected after an earlier
-// version let the mouth extend past the face's edge -- kept identical
-// here to the WebSocket version's calibration.
-function SkyFace({ voiceState }: { voiceState: "idle" | "listening" | "speaking" }) {
-  const [smiling, setSmiling] = useState(false);
-  useEffect(() => {
-    if (voiceState !== "idle") return;
-    const interval = setInterval(() => setSmiling((prev) => !prev), 1500);
-    return () => clearInterval(interval);
-  }, [voiceState]);
-
-  // Update cadence deliberately slow (200ms, not 60ms) -- a faster version
-  // caused enough continuous CPU load on kiosk hardware to noticeably
-  // delay the real-time audio/response pipeline in the WebSocket version;
-  // kept slow here too even though WebRTC may have more headroom, since
-  // there's no need to risk it for a purely decorative animation.
-  const [wavePhase, setWavePhase] = useState(0);
-  useEffect(() => {
-    if (voiceState !== "listening") return;
-    const interval = setInterval(() => setWavePhase((p) => (p + 0.5) % (Math.PI * 2)), 200);
-    return () => clearInterval(interval);
-  }, [voiceState]);
-
-  function buildWavePath(phase: number): string {
-    const steps = 10;
-    const midY = 15;
-    const amplitude = 6;
-    const points: string[] = [];
-    for (let i = 0; i <= steps; i++) {
-      const x = 28 + (i / steps) * 44;
-      const y = midY + Math.sin((i / steps) * Math.PI * 2 + phase) * amplitude;
-      points.push(`${i === 0 ? "M" : "L"} ${x.toFixed(1)},${y.toFixed(1)}`);
-    }
-    return points.join(" ");
-  }
-
-  const [dotHeights, setDotHeights] = useState<number[]>(Array(7).fill(4));
-  useEffect(() => {
-    if (voiceState !== "speaking") return;
-    const interval = setInterval(() => {
-      setDotHeights(Array.from({ length: 7 }, () => 3 + Math.random() * 10));
-    }, 220);
-    return () => clearInterval(interval);
-  }, [voiceState]);
-
-  return (
-    <div style={{ position: "relative", width: 100, height: 100 * (165 / 157), margin: "0 auto" }}>
-      <img
-        src="/brand/sky-head-base.png"
-        alt="Sky"
-        style={{ width: "100%", height: "100%", display: "block" }}
-      />
-      <svg
-        viewBox="0 0 100 30"
-        preserveAspectRatio="none"
-        style={{ position: "absolute", top: "39.3%", left: "24.8%", width: "58%", height: "14%" }}
-      >
-        {voiceState === "idle" ? (
-          <>
-            <path
-              d="M 28,15 L 72,15"
-              stroke="#f5f7fb"
-              strokeWidth="6"
-              strokeLinecap="round"
-              fill="none"
-              style={{ opacity: smiling ? 0 : 1, transition: "opacity 0.6s ease-in-out" }}
-            />
-            <path
-              d="M 28,10 Q 50,27 72,10"
-              stroke="#f5f7fb"
-              strokeWidth="6"
-              strokeLinecap="round"
-              fill="none"
-              style={{ opacity: smiling ? 1 : 0, transition: "opacity 0.6s ease-in-out" }}
-            />
-          </>
-        ) : null}
-
-        {voiceState === "listening" ? (
-          <path d={buildWavePath(wavePhase)} stroke="#f5f7fb" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-        ) : null}
-
-        {voiceState === "speaking"
-          ? dotHeights.map((h, i) => {
-              const x = 28 + i * (44 / 6);
-              const cy = 15;
-              return (
-                <rect
-                  key={i}
-                  x={x - 3}
-                  y={cy - h / 2}
-                  width="6"
-                  height={h}
-                  rx="3"
-                  fill="#f5f7fb"
-                  style={{ transition: "height 0.15s ease, y 0.15s ease" }}
-                />
-              );
-            })
-          : null}
-      </svg>
-    </div>
-  );
-}
-
-export function VoiceAssistant({ open, onClose, knownVisitor, onNeedFaceEnrollment }: VoiceAssistantProps) {
+export function VoiceAssistant({
+  open,
+  onClose,
+  knownVisitor,
+  onNeedFaceEnrollment,
+  onFormFieldUpdate,
+  onSkyStateChange,
+}: VoiceAssistantProps) {
   const [status, setStatus] = useState("idle");
   const [connected, setConnected] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -212,6 +125,16 @@ export function VoiceAssistant({ open, onClose, knownVisitor, onNeedFaceEnrollme
   useEffect(() => {
     onNeedFaceEnrollmentRef.current = onNeedFaceEnrollment;
   }, [onNeedFaceEnrollment]);
+  const onFormFieldUpdateRef = useRef(onFormFieldUpdate);
+  useEffect(() => {
+    onFormFieldUpdateRef.current = onFormFieldUpdate;
+  }, [onFormFieldUpdate]);
+
+  // Report Sky's state to the page so the bottom-bar head animates.
+  useEffect(() => {
+    const sky: SkyState = !open ? "off" : !connected ? "connecting" : voiceState;
+    onSkyStateChange?.(sky);
+  }, [open, connected, voiceState, onSkyStateChange]);
 
   // Rendered but not necessarily wired up to anything -- under WebRTC the
   // SDK is expected to handle attaching/playing the remote audio track
@@ -501,6 +424,33 @@ export function VoiceAssistant({ open, onClose, knownVisitor, onNeedFaceEnrollme
       },
     });
 
+    const captureRegistrationFieldTool = tool({
+      name: "capture_registration_field",
+      description:
+        "Call this the moment a NEW visitor gives you any registration detail (full name, phone, " +
+        "email, or whether they're a visitor or client) - even just one - so it appears on the " +
+        "kiosk screen as they speak. Only include the fields they actually just gave. This does " +
+        "not register them; still call register_visitor once you have all four.",
+      parameters: z.object({
+        full_name: z.string().nullable(),
+        mobile_number: z.string().nullable(),
+        email: z.string().nullable(),
+        visitor_type: z.enum(["visitor", "client"]).nullable(),
+      }),
+      async execute(fields: {
+        full_name: string | null; mobile_number: string | null; email: string | null; visitor_type: "visitor" | "client" | null;
+      }) {
+        const provided = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== null && v !== ""));
+        appendToolLog(`capture_registration_field(${JSON.stringify(provided)})`);
+        if (provided.mobile_number) {
+          // The form shows the local part next to its own country-code picker.
+          provided.mobile_number = String(provided.mobile_number).replace(/^\+971/, "").replace(/\D/g, "");
+        }
+        onFormFieldUpdateRef.current?.(provided);
+        return backgroundResult(JSON.stringify({ shown: true }));
+      },
+    });
+
     const endConversationTool = tool({
       name: "end_conversation",
       description:
@@ -515,7 +465,14 @@ export function VoiceAssistant({ open, onClose, knownVisitor, onNeedFaceEnrollme
       },
     });
 
-    return [lookupVisitorTool, registerVisitorTool, createBookingTool, previewRoomTool, endConversationTool];
+    return [
+      lookupVisitorTool,
+      registerVisitorTool,
+      captureRegistrationFieldTool,
+      createBookingTool,
+      previewRoomTool,
+      endConversationTool,
+    ];
   }
 
   // --- Instructions ---------------------------------------------------------
@@ -904,74 +861,42 @@ Be warm and professional, but brief - always.
     return null;
   }
 
+  // Last thing either side said, shown as a one-line caption so the
+  // visitor can see they were heard. Tool-log lines stay in the console.
+  const lastLine = [...transcript].reverse().find((line) => line.kind !== "tool");
+
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4">
-      <div className="w-full max-w-xs rounded-md border border-cyan/30 bg-panel p-4 shadow-2xl">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan">Voice assistance</p>
-            <h2 className="mt-1 text-lg font-semibold leading-tight">{status}</h2>
-            {currentVisitor ? (
-              <p className="mt-1 text-xs text-white/60">
-                Signed in as {currentVisitor.visitor_name} ({currentVisitor.visitor_type})
-              </p>
-            ) : null}
-          </div>
-          <button
-            aria-label="Close voice assistance"
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-white/15 bg-white/8"
-            onClick={handleDisconnect}
-            title="Close"
-            type="button"
-          >
-            <X className="h-4 w-4" />
+    <div className="voice-dock" role="status" aria-live="polite">
+      {roomPreview ? (
+        <figure className="voice-room">
+          <img key={roomPreview.imageUrl} alt={roomPreview.label} src={roomPreview.imageUrl} />
+          <figcaption>{roomPreview.label}</figcaption>
+        </figure>
+      ) : null}
+      <div className="voice-bubble">
+        <div className="voice-bubble-text">
+          <span className="voice-status">
+            {currentVisitor ? `${currentVisitor.visitor_name} · ` : ""}
+            {status}
+          </span>
+          {lastLine ? (
+            <p className={lastLine.kind === "user" ? "voice-line user" : "voice-line"}>{lastLine.text}</p>
+          ) : null}
+        </div>
+        <div className="voice-bubble-actions">
+          <button className="voice-action" onClick={handleToggleMute} type="button" aria-pressed={muted}>
+            {muted ? <MicOff aria-hidden /> : <Mic aria-hidden />}
+            <span>{muted ? "Unmute" : "Mute"}</span>
+          </button>
+          <button className="voice-action end" onClick={handleDisconnect} type="button">
+            <PhoneOff aria-hidden />
+            <span>End</span>
           </button>
         </div>
-
-        {roomPreview ? (
-          <div className="mt-3 overflow-hidden rounded-md bg-black/40">
-            <img
-              key={roomPreview.imageUrl}
-              alt={roomPreview.label}
-              src={roomPreview.imageUrl}
-              className="w-full rounded-md"
-              style={{ maxHeight: "220px", width: "100%", height: "auto", objectFit: "contain", animation: "voice-room-fade-in 0.4s ease" }}
-            />
-            <p className="mt-1 text-center text-xs text-white/60">{roomPreview.label}</p>
-          </div>
-        ) : null}
-
-        <div className="mt-3 flex justify-center">
-          <SkyFace voiceState={voiceState} />
-        </div>
-
-        <div className="mt-4 flex gap-2">
-          <KioskButton
-            className="flex-1 min-h-10 gap-1.5 px-3 text-sm [&_span]:whitespace-nowrap [&_svg]:h-4 [&_svg]:w-4"
-            onClick={handleToggleMute}
-            variant="secondary"
-          >
-            {muted ? "Unmute" : "Mute"}
-          </KioskButton>
-          <KioskButton
-            className="flex-1 min-h-10 gap-1.5 px-3 text-sm [&_span]:whitespace-nowrap [&_svg]:h-4 [&_svg]:w-4"
-            onClick={handleDisconnect}
-            variant="ghost"
-          >
-            End Conversation
-          </KioskButton>
-        </div>
-
-        {/* Fallback attach point for the remote audio track -- see the
-            NOTE in connect(). Hidden since it's only a safety net. */}
-        <audio autoPlay ref={audioElementRef} style={{ display: "none" }} />
       </div>
-      <style jsx>{`
-        @keyframes voice-room-fade-in {
-          from { opacity: 0; }
-          to { opacity: 1; }
-        }
-      `}</style>
+      {/* Fallback attach point for the remote audio track -- see the
+          NOTE in connect(). Hidden since it's only a safety net. */}
+      <audio autoPlay ref={audioElementRef} style={{ display: "none" }} />
     </div>
   );
 }

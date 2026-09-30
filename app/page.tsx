@@ -1,28 +1,47 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import {
-  BriefcaseBusiness,
+  ArrowLeft,
   CalendarDays,
   Check,
-  CircleHelp,
-  ClipboardList,
-  Home,
   KeyRound,
+  Mic,
   Phone,
-  Podcast,
-  ShieldCheck,
   Sparkles,
   User,
-  UserRoundPlus,
-  Video,
 } from "lucide-react";
 import { ApiRequestError, requestJson } from "@/lib/api";
 import { VoiceAssistant } from "@/components/kiosk/VoiceAssistant";
+import { SkyFace, type SkyState } from "@/components/kiosk/SkyFace";
+import { KioskSelect, type KioskOption } from "@/components/kiosk/KioskSelect";
+import { DatePicker, TimePicker } from "@/components/kiosk/DateTimePickers";
+import { PhotoImg, preloadRoomPhotos, roomDescription, ROOM_FACTS, ROOM_PHOTOS, RoomChoiceCard, RoomPhoto } from "@/components/kiosk/RoomPhoto";
+import { BrandHero, EyebrowMark, HeaderBrand, LogoCountdown, PanelBrand } from "@/components/kiosk/Brand";
+import { Typewriter } from "@/components/kiosk/Typewriter";
+import { VisitorPass, type VisitorPassDetails } from "@/components/kiosk/VisitorPass";
+import { usePresence } from "@/components/kiosk/usePresence";
+import { navigateBack, withViewTransition } from "@/components/kiosk/viewTransition";
+import { FaceScanOverlay, type KycMode, type KycPhase } from "@/components/kiosk/FaceScanOverlay";
+import {
+  CalendarIcon,
+  CreateProfileIcon,
+  EventsIcon,
+  ExploreIcon,
+  MeetingRoomIcon,
+  FindPlaceIcon,
+  HomeIcon,
+  IncognitoIcon,
+  PlanVisitIcon,
+  PodcastIcon,
+  ReportIcon,
+  ScanFaceIcon,
+  SupportIcon,
+  TikTokIcon,
+} from "@/components/kiosk/KioskIcons";
 import {
   isBookableService,
-  nextStepAfterRecognition,
   type KioskStep,
   type ServiceType,
 } from "@/lib/flow";
@@ -33,7 +52,6 @@ import {
   bookingDurationOptions,
   isPastDateTime,
   toDateInputValue,
-  toTimeInputValue,
 } from "@/lib/time";
 import { centerRoomOptions } from "@/lib/kiosk-content";
 
@@ -55,6 +73,8 @@ type VisitSession = {
 
 type FaceCheckSuggestion = {
   rank: number;
+  /** Optional display name, if the backend can resolve one for this match. */
+  name?: string | null;
   source_url: string;
   score?: number | null;
   thumbnail_base64?: string | null;
@@ -94,7 +114,27 @@ type CurrentBooking = {
 type ConfirmationState = {
   title: string;
   message: string;
+  /** Shown as the branded visitor pass. */
+  pass: VisitorPassDetails;
 };
+
+// "2026-09-28" -> "Mon 28 Sep 2026" (no timezone shift: it's a calendar date)
+function formatPassDate(isoDate: string) {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function formatDuration(minutes: number) {
+  if (minutes < 60) return `${minutes} min`;
+  const hours = minutes / 60;
+  return `${hours} hr${hours === 1 ? "" : "s"}`;
+}
 
 type KioskEvent = {
   event_id: number;
@@ -112,7 +152,45 @@ type BookingForm = {
   duration: string;
 };
 
+// "identify" = the "How would you like to continue?" screen (Figma node
+// 665-2650), shown after the start screen whether or not the face search
+// returned suggestions. Kept local so lib/flow.ts doesn't need to change.
+type Step = KioskStep | "identify" | "report-issue" | "room-select";
+
 const todayIso = () => toDateInputValue();
+
+// After a visit is finished (booking/event confirmed, support request sent,
+// or "Finish" on welcome-back), the kiosk counts down this many seconds and
+// then returns to the check-in screen for the next visitor.
+const AUTO_RETURN_SECONDS = 5;
+// The visitor pass (booking / event confirmed) stays longer so there's
+// time to read it before the kiosk returns to the start.
+const PASS_RETURN_SECONDS = 10;
+
+// "Scan my face again" scanner timing: time to settle the face in the
+// oval, then the ring fill while scanning (the photo is taken at its end),
+// then how long the result stays on screen before moving on.
+const KYC_ALIGN_MS = 1400;
+const KYC_SCAN_MS = 1800;
+const KYC_RESULT_MS = 1200;
+
+const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+// Start screen: "idle" until someone is detected close to the kiosk
+// (usePresence), then the same screen types over into the check-in text
+// and the face scan starts.
+const START_TEXT = {
+  idle: {
+    eyebrow: "Welcome",
+    title: "Welcome to\nInnovation City",
+    copy: "Step closer to the screen\nto check in.",
+  },
+  engaged: {
+    eyebrow: "Check in",
+    title: "Let\u2019s get you\nchecked in",
+    copy: "We may already have your profile.\nLet\u2019s take a quick look.",
+  },
+} as const;
 
 const FACE_LOGIN_SAMPLE_COUNT = 1;
 const FACE_LOGIN_RETRY_SAMPLE_COUNT = 2;
@@ -128,48 +206,62 @@ const initialBookingForm: BookingForm = {
   duration: "",
 };
 
+// Order + copy matches the Figma "What brings you to Innovation City
+// today?" grid (INC-live-dashboard, node 665-2912): Meeting, Events,
+// Booking, Tik Tok Studio, Podcast Studio, Support. Each card keeps its
+// existing `id` (and therefore its existing step/handler wiring) --
+// only the label, description, order, and icon changed to match.
 const serviceCards: Array<{
   id: ServiceType;
   title: string;
   description: string;
-  icon: typeof CalendarDays;
+  icon: () => React.ReactElement;
 }> = [
   {
-    id: "meeting_room",
-    title: "Book a Meeting Room",
-    description: "Reserve a space for meetings.",
-    icon: CalendarDays,
-  },
-  {
-    id: "podcast_studio",
-    title: "Book Podcast Studio",
-    description: "Record your next session.",
-    icon: Podcast,
-  },
-  {
-    id: "tiktok_studio",
-    title: "Book TikTok Studio",
-    description: "Create content in our studio.",
-    icon: Video,
+    id: "business_center",
+    title: "Explore",
+    description: "Discover the center's spaces.",
+    icon: ExploreIcon,
   },
   {
     id: "event",
-    title: "Attend an Event",
-    description: "Browse and join today's events.",
-    icon: ClipboardList,
+    title: "Events",
+    description: "Join an event or workshop.",
+    icon: EventsIcon,
   },
   {
-    id: "business_center",
-    title: "Business Center",
-    description: "Get voice-guided assistance.",
-    icon: BriefcaseBusiness,
+    id: "meeting_room",
+    title: "Meeting Rooms",
+    description: "Book or find a meeting room.",
+    icon: MeetingRoomIcon,
+  },
+  {
+    id: "tiktok_studio",
+    title: "Tik Tok Studio",
+    description: "Everything for TikTok Content",
+    icon: TikTokIcon,
+  },
+  {
+    id: "podcast_studio",
+    title: "Podcast Studio",
+    description: "Record, edit and stream with ease.",
+    icon: PodcastIcon,
   },
   {
     id: "other",
-    title: "Other Assistance",
-    description: "Connect with our CX team.",
-    icon: CircleHelp,
+    title: "Support",
+    description: "Get help with something else.",
+    icon: SupportIcon,
   },
+];
+
+type IdentifyOption = "visitor" | "new-profile" | "rescan" | "report";
+
+const identifyOptions: Array<{ id: IdentifyOption; label: string; icon: () => React.ReactElement }> = [
+  { id: "visitor", label: "Continue as a visitor", icon: IncognitoIcon },
+  { id: "new-profile", label: "Create new profile", icon: CreateProfileIcon },
+  { id: "rescan", label: "Scan my face again", icon: ScanFaceIcon },
+  { id: "report", label: "Report recognition issue", icon: ReportIcon },
 ];
 
 const countryCodeOptions = [
@@ -188,15 +280,37 @@ function normalizeLocalMobileNumber(value: string): string {
 }
 
 export default function KioskPage() {
-  const [step, setStep] = useState<KioskStep>("start");
+  const [step, setStepNow] = useState<Step>("start");
+  const stepRef = useRef<Step>("start");
+  stepRef.current = step;
+  // Every screen change goes through here, so each one animates (screen
+  // content slides, the logo morphs between welcome and header). See
+  // components/kiosk/viewTransition.ts.
+  const setStep = useCallback((next: SetStateAction<Step>) => {
+    if (typeof next !== "function" && next === stepRef.current) return;
+    withViewTransition(() => setStepNow(next));
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [captureId, setCaptureId] = useState<number | null>(null);
   const [facecheckSuggestions, setFacecheckSuggestions] = useState<FaceCheckSuggestion[] | null>(null);
   const [scanState, setScanState] = useState<"idle" | "scanning" | "recognized" | "unknown">("idle");
-  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
-  const previewStreamRef = useRef<MediaStream | null>(null);
   const autoScanTriggeredRef = useRef(false);
+  const [presence, setPresence] = useState<"idle" | "engaged">("idle");
+  // Becomes true once the check-in title has finished typing -- the face
+  // scan starts then, so the visitor has had a moment to face the camera.
+  const [greetingReady, setGreetingReady] = useState(false);
+  const [kycPhase, setKycPhase] = useState<KycPhase | null>(null);
+  const [issueText, setIssueText] = useState("");
+  // Guest pressed Reserve slot / Register for event: registration sheet
+  // opens over the same screen, then that action finishes automatically.
+  const [quickRegister, setQuickRegister] = useState<null | { action: "booking" | "event"; tab: "new" | "existing" }>(null);
+  // Which thank-you to show: the normal end of a visit, or after a report.
+  const [thankYouKind, setThankYouKind] = useState<"visit" | "report">("visit");
+  const kycCancelledRef = useRef(false);
+  const [kycMode, setKycMode] = useState<KycMode>("check-in");
+  // The scanner's camera stream, kept so "Scan again" can reuse it.
+  const kycStreamRef = useRef<MediaStream | null>(null);
   const [visitor, setVisitor] = useState<Visitor | null>(null);
   const [visitSession, setVisitSession] = useState<VisitSession | null>(null);
   const [currentBookings, setCurrentBookings] = useState<CurrentBooking[]>([]);
@@ -209,6 +323,7 @@ export default function KioskPage() {
   const [otherReason, setOtherReason] = useState("start_company");
   const [otherNotes, setOtherNotes] = useState("");
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [skyState, setSkyState] = useState<SkyState>("off");
   const [enrollmentProgress, setEnrollmentProgress] = useState(0);
   const [enrollmentError, setEnrollmentError] = useState<string | null>(null);
   const enrollmentVisitorRef = useRef<Visitor | null>(null);
@@ -227,47 +342,12 @@ export default function KioskPage() {
 
   useEffect(() => {
     if (step !== "start") {
-      if (previewStreamRef.current) {
-        previewStreamRef.current.getTracks().forEach((track) => track.stop());
-        previewStreamRef.current = null;
-      }
-      return;
-    }
-
-    let cancelled = false;
-    navigator.mediaDevices
-      ?.getUserMedia({ video: { facingMode: "user" }, audio: false })
-      .then((stream) => {
-        if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        previewStreamRef.current = stream;
-        if (previewVideoRef.current) {
-          previewVideoRef.current.srcObject = stream;
-        }
-      })
-      .catch(() => {
-        /* camera preview optional; capture flow still handles its own access */
-      });
-
-    return () => {
-      cancelled = true;
-      if (previewStreamRef.current) {
-        previewStreamRef.current.getTracks().forEach((track) => track.stop());
-        previewStreamRef.current = null;
-      }
-    };
-  }, [step]);
-
-  useEffect(() => {
-    if (step !== "start") {
       // Leaving the start screen (visit finished / reset) re-arms the
       // trigger so the *next* visitor's page-open fires a fresh scan.
       autoScanTriggeredRef.current = false;
       return;
     }
-    if (autoScanTriggeredRef.current) {
+    if (autoScanTriggeredRef.current || presence !== "engaged" || !greetingReady) {
       return;
     }
     // Give the page a beat to settle (camera preview above is also
@@ -280,10 +360,12 @@ export default function KioskPage() {
     const timer = window.setTimeout(() => {
       autoScanTriggeredRef.current = true;
       handleFaceScan();
-    }, 400);
+    }, 150);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }, [step, presence, greetingReady]);
+
+  usePresence(step === "start" && presence === "idle", () => setPresence("engaged"));
 
   const firstName = useMemo(() => {
     return visitor?.visitor_name?.split(" ")[0] || "John";
@@ -298,6 +380,12 @@ export default function KioskPage() {
     setCurrentBookings([]);
     setCaptureId(null);
     setFacecheckSuggestions(null);
+    setScanState("idle");
+    setPresence("idle");
+    setGreetingReady(false);
+    setIssueText("");
+    setThankYouKind("visit");
+    setQuickRegister(null);
     setSelectedEvent(null);
     setConfirmation(null);
     setBookingForm({ ...initialBookingForm, date: todayIso() });
@@ -355,14 +443,23 @@ export default function KioskPage() {
     setStep("register");
   }
 
-  async function handleFaceScan() {
+  async function handleFaceScan(
+    scanner: {
+      stream?: MediaStream;
+      onChecking?: () => void;
+      /** Shows the result on the scanner before the page moves on. */
+      onResult?: (result: "found" | "not-found" | "error") => Promise<void>;
+    } = {},
+  ) {
     setBusy(true);
     setError(null);
     setScanState("scanning");
     try {
       const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT, {
         updateEnrollmentProgress: false,
+        stream: scanner.stream,
       });
+      scanner.onChecking?.();
       const result = await requestJson<RecognitionResult>("/api/kiosk/recognize-face", {
         method: "POST",
         body: JSON.stringify({ images_base64: images }),
@@ -370,6 +467,7 @@ export default function KioskPage() {
 
       if (result.recognized && result.visitor_id) {
         setScanState("recognized");
+        await scanner.onResult?.("found");
         const foundVisitor = await requestJson<Visitor>(`/api/kiosk/visitors/${result.visitor_id}`);
         setVisitor(foundVisitor);
         await createSession(foundVisitor, "face");
@@ -383,17 +481,20 @@ export default function KioskPage() {
         setCaptureId(result.capture_id);
       }
 
-      if (result.facecheck_suggestions && result.facecheck_suggestions.length > 0) {
-        setScanState("unknown");
-        setFacecheckSuggestions(result.facecheck_suggestions);
-        return;
-      }
-
-      setScanState("idle");
-      setStep(nextStepAfterRecognition(false));
+      // Not recognized: always move on to the "How would you like to
+      // continue?" screen. With FaceCheckID suggestions it shows up to 3
+      // match cards; without any it shows only the 4 options.
+      const suggestions = result.facecheck_suggestions ?? [];
+      await scanner.onResult?.("not-found");
+      setScanState(suggestions.length > 0 ? "unknown" : "idle");
+      setFacecheckSuggestions(suggestions.length > 0 ? suggestions.slice(0, 3) : null);
+      setStep("identify");
     } catch (scanError) {
+      await scanner.onResult?.("error");
       setError(scanError instanceof Error ? scanError.message : "Face scan failed.");
       setScanState("idle");
+      setFacecheckSuggestions(null);
+      setStep("identify");
     } finally {
       setBusy(false);
     }
@@ -410,6 +511,132 @@ export default function KioskPage() {
     setError(null);
     setRegistration((value) => ({ ...value }));
     setStep("register");
+  }
+
+  function handleIdentifyOption(option: IdentifyOption) {
+    setError(null);
+    if (option === "visitor") {
+      // Guest path: no profile, straight to the services grid. Bookings
+      // still ask them to create/verify a profile first (handleBooking).
+      // Suggestions are kept so Home shows the same match cards again.
+      setStep("service-selection");
+      return;
+    }
+    if (option === "new-profile") {
+      // Same as picking a suggestion: keeps captureId, so registration
+      // links + enrolls the face that was just scanned.
+      handleFaceCheckRespond();
+      return;
+    }
+    if (option === "rescan") {
+      kycCancelledRef.current = false;
+      setKycMode("check-in");
+      setKycPhase("starting"); // the overlay opens the camera, then runKycScan()
+      return;
+    }
+    // "Report recognition issue": a simple message box, no registration.
+    setIssueText("");
+    setStep("report-issue");
+  }
+
+  // Runs once the scanner overlay has the camera: settle, scan, check,
+  // show the result, then continue exactly like the automatic scan.
+  async function runKycScan(stream: MediaStream) {
+    setKycPhase("align");
+    await wait(KYC_ALIGN_MS);
+    if (kycCancelledRef.current) return;
+    setKycPhase("scanning");
+    await wait(KYC_SCAN_MS);
+    if (kycCancelledRef.current) return;
+    await handleFaceScan({
+      stream,
+      onChecking: () => setKycPhase("checking"),
+      onResult: async (result) => {
+        setKycPhase(result);
+        await wait(KYC_RESULT_MS);
+      },
+    });
+    setKycPhase(null);
+  }
+
+  // New visitor: settle, scan (the photos are taken in the last part of the
+  // scan), save the face profile, show "Face saved", then go to services.
+  // On failure the scanner stays open with "Scan again" / "Continue without".
+  async function runKycEnroll(stream: MediaStream) {
+    const nextVisitor = enrollmentVisitorRef.current || visitor;
+    if (!nextVisitor) return;
+    setEnrollmentError(null);
+    setKycPhase("align");
+    await wait(KYC_ALIGN_MS);
+    if (kycCancelledRef.current) return;
+    setKycPhase("scanning");
+    await wait(Math.max(0, KYC_SCAN_MS - 700)); // 3 photos take ~0.7s
+    if (kycCancelledRef.current) return;
+    setBusy(true);
+    try {
+      const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT, { updateEnrollmentProgress: false, stream });
+      if (kycCancelledRef.current) return;
+      setKycPhase("checking");
+      await requestJson<FaceProfileResult>("/api/kiosk/face-profile", {
+        method: "POST",
+        body: JSON.stringify({ visitor_id: nextVisitor.visitor_id, images_base64: images }),
+      });
+      await createSession(nextVisitor, "manual");
+      setKycPhase("found");
+      await wait(KYC_RESULT_MS);
+      setKycPhase(null);
+      setStep("service-selection");
+    } catch (enrollError) {
+      console.warn("Face enrollment failed:", enrollError);
+      setEnrollmentError(enrollError instanceof Error ? enrollError.message : "Could not enroll your face.");
+      setKycPhase("error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleKycStream(stream: MediaStream) {
+    kycStreamRef.current = stream;
+    if (kycMode === "enroll") runKycEnroll(stream);
+    else runKycScan(stream);
+  }
+
+  function cancelKycScan() {
+    kycCancelledRef.current = true;
+    setKycPhase(null);
+    // Backing out of registration returns to the face-consent choice.
+    if (kycMode === "enroll") setStep("facial-consent");
+  }
+
+  function goHome() {
+    // Figma's "Click on Home" goes back to the "How would you like to
+    // continue?" screen, not the check-in screen. The visit (visitor,
+    // session, match suggestions) is kept; "Back to start" on the
+    // thank-you screen is still the full reset.
+    setError(null);
+    setConfirmation(null);
+    setSelectedEvent(null);
+    navigateBack();
+    setStep("identify");
+  }
+
+  // Full reset for the next visitor: also hangs up any voice session so the
+  // next person doesn't inherit this visitor's conversation.
+  //
+  // The countdown's logo circle and the welcome screen's big logo share a
+  // view-transition name, so the browser flies the circle up and grows it
+  // into the welcome logo while the rest crossfades (globals.css). Browsers
+  // without View Transitions just switch screens.
+  function finishVisit() {
+    withViewTransition(() => {
+      setVoiceOpen(false);
+      resetFlow();
+    }, "reset");
+  }
+
+  function handleSkyPress() {
+    // Sky is the only voice entry point now: tap to start, tap again to stop.
+    setVoiceOpen((open) => !open);
   }
 
   async function handleProfileLookup(event: FormEvent<HTMLFormElement>) {
@@ -431,6 +658,83 @@ export default function KioskPage() {
       setVoiceOpen(true);
     } catch (lookupError) {
       setError(lookupError instanceof Error ? lookupError.message : "Profile not found.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Creates the visitor from the `registration` form. If this visit started
+  // with a face scan, links that scan to the new profile (and enrolls it).
+  async function createVisitorFromForm(): Promise<{ visitor: Visitor; linkedFace: boolean }> {
+    const mobileNumber = `${registration.country_code}${normalizeLocalMobileNumber(registration.mobile_number)}`;
+    if (captureId) {
+      const linkResult = await requestJson<LinkCaptureResult>(`/api/face/captures/${captureId}/link`, {
+        method: "POST",
+        body: JSON.stringify({
+          full_name: registration.full_name,
+          mobile_number: mobileNumber,
+          email: registration.email,
+          visitor_type: registration.visitor_type,
+          enroll_face: true,
+        }),
+      });
+      const linkedVisitor = await requestJson<Visitor>(`/api/kiosk/visitors/${linkResult.visitor_id}`);
+      setCaptureId(null);
+      return { visitor: linkedVisitor, linkedFace: true };
+    }
+    const createdVisitor = await requestJson<Visitor>("/api/kiosk/profiles", {
+      method: "POST",
+      body: JSON.stringify({
+        full_name: registration.full_name,
+        mobile_number: mobileNumber,
+        email: registration.email,
+        visitor_type: registration.visitor_type,
+        company_name: null,
+        company_number: null,
+      }),
+    });
+    return { visitor: createdVisitor, linkedFace: false };
+  }
+
+  // Registration sheet submit: sign the guest in (new profile or lookup),
+  // start their session, then finish the booking / event they asked for.
+  async function handleQuickRegister(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!quickRegister) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let nextVisitor: Visitor;
+      let method: "face" | "lookup" | "manual";
+      if (quickRegister.tab === "existing") {
+        nextVisitor = await requestJson<Visitor>("/api/kiosk/profile-lookup", {
+          method: "POST",
+          body: JSON.stringify({
+            full_name: lookup.full_name,
+            mobile_number: `${lookup.country_code}${normalizeLocalMobileNumber(lookup.mobile_number)}`,
+          }),
+        });
+        method = "lookup";
+      } else {
+        const created = await createVisitorFromForm();
+        nextVisitor = created.visitor;
+        method = created.linkedFace ? "face" : "manual";
+      }
+      setVisitor(nextVisitor);
+      const session = await createSession(nextVisitor, method);
+      const action = quickRegister.action;
+      setQuickRegister(null);
+      setBusy(false);
+      if (action === "booking") await submitBooking(nextVisitor, session.visit_session_id);
+      else await submitEventRegistration(nextVisitor, session.visit_session_id);
+    } catch (registerError) {
+      setError(
+        registerError instanceof Error
+          ? registerError.message
+          : quickRegister.tab === "existing"
+            ? "Profile not found."
+            : "Could not create profile.",
+      );
     } finally {
       setBusy(false);
     }
@@ -511,7 +815,11 @@ export default function KioskPage() {
         setEnrollmentProgress(0);
         setEnrollmentError(null);
         setStep("scan-progress");
-        await enrollFaceForVisitor(updatedVisitor);
+        // Same full-screen scanner as "Scan my face again", in enroll mode;
+        // it opens the camera and then calls runKycEnroll().
+        kycCancelledRef.current = false;
+        setKycMode("enroll");
+        setKycPhase("starting");
       } else {
         await createSession(updatedVisitor, "manual");
         setStep("service-selection");
@@ -525,20 +833,26 @@ export default function KioskPage() {
 
   async function captureFaceSamples(
     sampleCount = FACE_ENROLLMENT_SAMPLE_COUNT,
-    options: { updateEnrollmentProgress?: boolean } = {},
+    options: { updateEnrollmentProgress?: boolean; stream?: MediaStream } = {},
   ): Promise<string[]> {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("Camera access is not available in this browser.");
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "user",
-        width: { ideal: FACE_CAPTURE_WIDTH },
-        height: { ideal: FACE_CAPTURE_HEIGHT },
-      },
-      audio: false,
-    });
+    // The face-scan overlay passes in the stream it is already showing, so
+    // the photo comes from the same camera feed the visitor sees. That
+    // stream belongs to the overlay, so it isn't stopped here.
+    const ownsStream = !options.stream;
+    const stream =
+      options.stream ??
+      (await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "user",
+          width: { ideal: FACE_CAPTURE_WIDTH },
+          height: { ideal: FACE_CAPTURE_HEIGHT },
+        },
+        audio: false,
+      }));
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
@@ -571,32 +885,11 @@ export default function KioskPage() {
       }
       return samples;
     } finally {
-      stream.getTracks().forEach((track) => track.stop());
+      if (ownsStream) stream.getTracks().forEach((track) => track.stop());
     }
   }
 
-  async function enrollFaceForVisitor(nextVisitor: Visitor) {
-    setBusy(true);
-    setEnrollmentError(null);
-    try {
-      const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT);
-      await requestJson<FaceProfileResult>("/api/kiosk/face-profile", {
-        method: "POST",
-        body: JSON.stringify({
-          visitor_id: nextVisitor.visitor_id,
-          images_base64: images,
-        }),
-      });
-      await createSession(nextVisitor, "manual");
-      setStep("service-selection");
-    } catch (enrollError) {
-      setEnrollmentError(enrollError instanceof Error ? enrollError.message : "Could not enroll your face.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // Narrower than enrollFaceForVisitor above: just captures + saves a face
+  // Unlike the on-screen registration scan (runKycEnroll): just captures + saves a face
   // photo, without navigating the page or creating a session -- called
   // from inside the voice assistant's register_visitor tool, where the
   // visitor could be on any screen and the voice conversation should just
@@ -640,14 +933,6 @@ export default function KioskPage() {
     setStep((currentStep) => (currentStep === "register" ? currentStep : "register"));
   }
 
-  async function retryFaceEnrollment() {
-    const nextVisitor = enrollmentVisitorRef.current || visitor;
-    if (!nextVisitor) return;
-    setEnrollmentProgress(0);
-    setEnrollmentError(null);
-    await enrollFaceForVisitor(nextVisitor);
-  }
-
   async function skipFaceEnrollment() {
     const nextVisitor = enrollmentVisitorRef.current || visitor;
     if (!nextVisitor) return;
@@ -677,7 +962,7 @@ export default function KioskPage() {
               ? "POD_1"
               : "TTS_1",
       }));
-      if (service === "meeting_room") setStep("booking");
+      if (service === "meeting_room") setStep("room-select"); // pick the room by photo first
       if (service === "podcast_studio") setStep("booking-podcast");
       if (service === "tiktok_studio") setStep("booking-tiktok");
       return;
@@ -706,8 +991,8 @@ export default function KioskPage() {
 
   async function handleBooking(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!visitor) {
-      setError("Please create or verify a profile first.");
+    if (!bookingForm.date || !bookingForm.time || !bookingForm.duration) {
+      setError("Choose a date, time and duration first.");
       return;
     }
 
@@ -721,14 +1006,24 @@ export default function KioskPage() {
       return;
     }
 
+    if (!visitor) {
+      // Not registered / recognised: register right here, then book.
+      setError(null);
+      setQuickRegister({ action: "booking", tab: "new" });
+      return;
+    }
+    await submitBooking(visitor, visitSession?.visit_session_id);
+  }
+
+  async function submitBooking(activeVisitor: Visitor, visitSessionId?: number) {
     setBusy(true);
     setError(null);
     try {
       const createdBooking = await requestJson<CurrentBooking>("/api/kiosk/bookings", {
         method: "POST",
         body: JSON.stringify({
-          visitor_id: visitor.visitor_id,
-          visit_session_id: visitSession?.visit_session_id,
+          visitor_id: activeVisitor.visitor_id,
+          visit_session_id: visitSessionId,
           service_type: selectedService,
           zone_id: bookingForm.zoneId,
           booking_date: bookingForm.date,
@@ -736,9 +1031,25 @@ export default function KioskPage() {
           duration_minutes: Number.parseInt(bookingForm.duration, 10),
         }),
       });
-      setConfirmation({
+      showConfirmation({
         title: "Booking Confirmed",
         message: `${createdBooking.room_name} is reserved from ${formatTime(createdBooking.booking_time_start)} to ${formatTime(createdBooking.booking_time_end)}.`,
+        pass: {
+          status: "Booking confirmed",
+          name: activeVisitor.visitor_name,
+          placeLabel: "Room",
+          place: createdBooking.room_name,
+          date: formatPassDate(bookingForm.date),
+          time: `${formatSlot(formatTime(createdBooking.booking_time_start))} – ${formatSlot(formatTime(createdBooking.booking_time_end))}`,
+          timeDetail: formatDuration(Number.parseInt(bookingForm.duration, 10)),
+          note: "Tap Find a place any time for directions to your room.",
+          photo:
+            selectedService === "meeting_room"
+              ? ROOM_PHOTOS[bookingForm.zoneId] ?? ROOM_PHOTOS.MR_1
+              : selectedService === "podcast_studio"
+                ? ROOM_PHOTOS.podcast_studio
+                : ROOM_PHOTOS.tiktok_studio,
+        },
       });
     } catch (bookingError) {
       if (bookingError instanceof ApiRequestError && bookingError.errorCode === "BOOKING_OVERLAP") {
@@ -752,22 +1063,41 @@ export default function KioskPage() {
   }
 
   async function handleEventRegistration() {
-    if (!visitor || !selectedEvent) return;
+    if (!selectedEvent) return;
+    if (!visitor) {
+      setError(null);
+      setQuickRegister({ action: "event", tab: "new" });
+      return;
+    }
+    await submitEventRegistration(visitor, visitSession?.visit_session_id);
+  }
 
+  async function submitEventRegistration(activeVisitor: Visitor, visitSessionId?: number) {
+    if (!selectedEvent) return;
     setBusy(true);
     setError(null);
     try {
       await requestJson("/api/kiosk/events/select", {
         method: "POST",
         body: JSON.stringify({
-          visitor_id: visitor.visitor_id,
-          visit_session_id: visitSession?.visit_session_id,
+          visitor_id: activeVisitor.visitor_id,
+          visit_session_id: visitSessionId,
           event_id: selectedEvent.event_id,
         }),
       });
-      setConfirmation({
+      showConfirmation({
         title: "Event Registration Confirmed",
         message: `You are registered for ${selectedEvent.event_name}. Please be seated 10 minutes before the event starts.`,
+        pass: {
+          status: "Registered for event",
+          name: activeVisitor.visitor_name,
+          placeLabel: "Event",
+          place: selectedEvent.event_name,
+          date: formatPassDate(todayIso()),
+          time: formatSlot(formatTime(selectedEvent.event_time_start)),
+          timeDetail: selectedEvent.event_location,
+          note: "Please be seated 10 minutes before the event starts.",
+        },
       });
     } catch (eventError) {
       setError(eventError instanceof Error ? eventError.message : "Could not select event.");
@@ -776,15 +1106,45 @@ export default function KioskPage() {
     }
   }
 
+  // Opening the visitor pass animates like a screen change: the header
+  // logo flies down into the pass's countdown logo.
+  function showConfirmation(next: ConfirmationState) {
+    withViewTransition(() => setConfirmation(next), "overlay");
+  }
+
   function continueToServices() {
     setConfirmation(null);
     setSelectedEvent(null);
     setStep("service-selection");
   }
 
-  function finishConfirmedAction() {
-    setConfirmation(null);
-    setStep("thank-you");
+
+
+  // Recognition problems usually come from people who weren't recognised,
+  // so this doesn't need a visitor profile. capture_id (when there is one)
+  // links the report to the face scan that went wrong.
+  async function handleIssueSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = issueText.trim();
+    if (!message) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await requestJson("/api/kiosk/recognition-issues", {
+        method: "POST",
+        body: JSON.stringify({
+          message,
+          capture_id: captureId ?? null,
+          visitor_id: visitor?.visitor_id ?? null,
+        }),
+      });
+      setThankYouKind("report");
+      setStep("thank-you");
+    } catch (issueError) {
+      setError(issueError instanceof Error ? issueError.message : "Could not send your message. Please try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleOtherSubmit(event: FormEvent<HTMLFormElement>) {
@@ -821,427 +1181,786 @@ export default function KioskPage() {
         ? "Book TikTok Studio"
         : "Book a Meeting Room";
 
+  const onStart = step === "start" || step === "identify";
+
+  // One countdown for every "visit finished" moment. Confirmations go
+  // straight back to the start (no extra thank-you screen in between);
+  // tapping "Other services" on the dialog cancels it.
+  const visitFinished = step === "thank-you" || confirmation !== null;
+  const returnSeconds = confirmation ? PASS_RETURN_SECONDS : AUTO_RETURN_SECONDS;
+  const secondsLeft = useCountdown(visitFinished, returnSeconds, finishVisit, confirmation ?? step);
+
   return (
-    <main className="min-h-screen bg-[#efefef] text-white">
-      <section className="mx-auto grid min-h-screen place-items-center">
-        <div className="kiosk-frame">
-          <TopBar />
-          <div className="kiosk-content" style={{ paddingBottom: "56px" }}>
-            {error ? <StatusBanner tone="error" message={error} /> : null}
+    <main className="kiosk-stage">
+      <div className="kiosk-frame" data-voice={voiceOpen ? "on" : "off"}>
+        <KioskBackdrop
+          photo={
+            step === "booking"
+              ? ROOM_PHOTOS[bookingForm.zoneId] ?? ROOM_PHOTOS.MR_1
+              : step === "booking-podcast"
+                ? ROOM_PHOTOS.podcast_studio
+                : step === "booking-tiktok"
+                  ? ROOM_PHOTOS.tiktok_studio
+                  : undefined
+          }
+        />
+        {/* On the finish screens the header logo hands over to the countdown
+            logo (it flies down into it), so the header one isn't shown. */}
+        <TopBar morphMark showBrand={step !== "start" && step !== "thank-you" && !confirmation} />
 
-            {step === "start" ? (
-              <Screen>
-                <ScreenTitle title="Welcome to Innovation City" center />
-                <p className="screen-copy text-center">Please look at the camera while we check your registration.</p>
-                <LiveFaceOrb
-                  videoRef={previewVideoRef}
-                  label={busy ? "SCANNING FACE..." : "READY TO SCAN"}
-                  scanState={scanState}
+        <section className="kiosk-panel">
+          {step !== "start" ? <PanelBrand /> : null}
+          {error && !quickRegister ? <StatusBanner tone="error" message={error} /> : null}
+
+          {step === "start" ? (
+            <Screen hero>
+              <BrandHero />
+              <Eyebrow key={presence} label={START_TEXT[presence].eyebrow} />
+              <div className="hero-texts">
+                <Typewriter
+                  as="h1"
+                  className="hero-title"
+                  onDone={() => {
+                    if (presence === "engaged") setGreetingReady(true);
+                  }}
+                  text={START_TEXT[presence].title}
                 />
-                <PrimaryButton disabled={busy} onClick={handleFaceScan}>
-                  {busy ? "Scanning..." : "Start Face Scan"}
-                </PrimaryButton>
-              </Screen>
-            ) : null}
+                <Typewriter
+                  className={presence === "idle" ? "hero-copy idle" : "hero-copy"}
+                  delayMs={presence === "engaged" ? 700 : 900}
+                  eraseMs={10}
+                  text={START_TEXT[presence].copy}
+                  typeMs={24}
+                />
+              </div>
+            </Screen>
+          ) : null}
 
-            {step === "profile-lookup" ? (
-              <Screen>
-                <ScreenTitle title="Face Not Recognized" fontSize="20px" />
-                <p className="screen-copy">Please enter your details so we can find your profile</p>
-                <form className="stack" onSubmit={handleProfileLookup}>
-                  <Panel>
-                    <Field
-                      icon={<User size={18} />}
-                      label="Full Name"
-                      onChange={(event) => setLookup((value) => ({ ...value, full_name: event.target.value }))}
-                      placeholder="Enter your full name"
-                      required
-                      value={lookup.full_name}
-                    />
-                    <Field
-                      icon={<Phone size={18} />}
-                      label="Mobile Number"
-                      onChange={(event) => setLookup((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
-                      placeholder="50 123 4567"
-                      required
-                      value={lookup.mobile_number}
-                      leadingAddon={
-                        <CountryCodeSelect
-                          onChange={(countryCode) => setLookup((value) => ({ ...value, country_code: countryCode }))}
-                          value={lookup.country_code}
-                        />
-                      }
-                    />
-                  </Panel>
-                  <PageVoiceButton onClick={() => setVoiceOpen(true)} />
-                  <PrimaryButton disabled={busy} type="submit">Continue</PrimaryButton>
-                  <p className="inline-note">
-                    Don't have an account?{" "}
-                    <button onClick={handleRegisterLink} type="button">Press here to register</button>
-                  </p>
-                </form>
-              </Screen>
-            ) : null}
-
-            {step === "register" ? (
-              <Screen scroll>
-                <ScreenTitle title="Create Your Profile" />
-                <p className="screen-copy">Please fill in your details to continue.</p>
-                <form className="stack" onSubmit={handleRegistration}>
-                  <Panel>
-                    <Field
-                      label="Full Name"
-                      onChange={(event) => setRegistration((value) => ({ ...value, full_name: event.target.value }))}
-                      placeholder="Enter your name"
-                      required
-                      value={registration.full_name}
-                    />
-                    <Field
-                      label="Mobile Number"
-                      onChange={(event) => setRegistration((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
-                      placeholder="50 123 4567"
-                      required
-                      value={registration.mobile_number}
-                      leadingAddon={
-                        <CountryCodeSelect
-                          onChange={(countryCode) => setRegistration((value) => ({ ...value, country_code: countryCode }))}
-                          value={registration.country_code}
-                        />
-                      }
-                    />
-                    <Field
-                      label="Email Address"
-                      onChange={(event) => setRegistration((value) => ({ ...value, email: event.target.value }))}
-                      placeholder="name@company.com"
-                      required
-                      type="email"
-                      value={registration.email}
-                    />
-                    <div className="toggle-field">
-                      <span>I am visiting as:</span>
-                      <div className="segmented-toggle">
-                        <button
-                          className={registration.visitor_type === "client" ? "active" : ""}
-                          onClick={() => setRegistration((value) => ({ ...value, visitor_type: "client" }))}
-                          type="button"
-                        >
-                          Client
-                        </button>
-                        <button
-                          className={registration.visitor_type === "visitor" ? "active" : ""}
-                          onClick={() => setRegistration((value) => ({ ...value, visitor_type: "visitor" }))}
-                          type="button"
-                        >
-                          Visitor
-                        </button>
-                      </div>
-                    </div>
-                  </Panel>
-                  <PageVoiceButton onClick={() => setVoiceOpen(true)} />
-                  <div className="screen-actions two">
-                    <OutlineButton onClick={() => setStep("profile-lookup")} type="button">Back</OutlineButton>
-                    <PrimaryButton disabled={busy} type="submit">Continue</PrimaryButton>
-                  </div>
-                </form>
-              </Screen>
-            ) : null}
-
-            {step === "facial-consent" ? (
-              <Screen>
-                <ScreenTitle title="Enable Faster Check-In?" />
-                <p className="screen-copy">Would you like to allow a facial scan to help us recognise you faster on future visits?</p>
-                <button className="consent-card" onClick={() => setConsentChecked((value) => !value)} type="button">
-                  <span className="check-box">{consentChecked ? <Check /> : null}</span>
-                  <span>I understand and consent to using facial recognition for future check-ins.</span>
-                </button>
-                <PrimaryButton disabled={busy} onClick={() => handleConsent(consentChecked)} icon={<ShieldCheck />}>
-                  Yes, Enable Faster Check-In
-                </PrimaryButton>
-                <OutlineButton disabled={busy} onClick={() => handleConsent(false)}>
-                  No, Continue Without Facial Scan
-                </OutlineButton>
-                <p className="tiny-note">You can continue without facial recognition.</p>
-              </Screen>
-            ) : null}
-
-            {step === "scan-progress" ? (
-              <Screen>
-                <ScreenTitle title="Facial Scan in Progress" center />
-                <p className="screen-copy text-center">
-                  Please look at the camera and stay still while we capture your face profile.
-                </p>
-                <FaceOrb label={enrollmentError ? "SCAN NEEDS RETRY" : `CAPTURING ${enrollmentProgress}/3`} />
-                {enrollmentError ? (
+          {step === "identify" ? (
+            <Screen>
+              <TitleBlock eyebrow="Check in">
+                How would you like
+                <br />
+                to continue?
+              </TitleBlock>
+              <div className={facecheckSuggestions && facecheckSuggestions.length > 0 ? "options-section tight" : "options-section"}>
+                {facecheckSuggestions && facecheckSuggestions.length > 0 ? (
                   <>
-                    <StatusBanner tone="error" message={enrollmentError} />
-                    <PrimaryButton disabled={busy} onClick={retryFaceEnrollment}>Retry Face Scan</PrimaryButton>
-                    <OutlineButton disabled={busy} onClick={skipFaceEnrollment}>
-                      Continue Without Facial Scan
-                    </OutlineButton>
+                    <Divider>Do any of these look like your profile?</Divider>
+                    <div className="match-row">
+                      {facecheckSuggestions.map((candidate) => (
+                        <button
+                          className="glass-card match-card"
+                          disabled={busy}
+                          key={candidate.rank}
+                          onClick={handleFaceCheckRespond}
+                          type="button"
+                        >
+                          <span className="match-head">
+                            <span className="dim">Match</span>
+                            <span>{typeof candidate.score === "number" ? `${Math.round(candidate.score * 100)}%` : ""}</span>
+                          </span>
+                          <span className="match-photo">
+                            {candidate.thumbnail_base64 ? (
+                              <img alt="" src={candidate.thumbnail_base64} />
+                            ) : (
+                              <span>{candidate.rank}</span>
+                            )}
+                          </span>
+                          <span className="match-name">{suggestionLabel(candidate)}</span>
+                          <CornerTick />
+                        </button>
+                      ))}
+                    </div>
+                    <Divider>None of these options — choose one of the options</Divider>
                   </>
                 ) : (
-                  <StatusBanner
-                    tone="success"
-                    message={
-                      enrollmentProgress >= 3
-                        ? "Finalising your face profile..."
-                        : "Your profile has been created. Face enrollment is starting."
+                  <Divider>We couldn&rsquo;t find your profile — choose one of the options</Divider>
+                )}
+                <div className="card-grid">
+                  {identifyOptions.map((option) => (
+                    <button
+                      className="glass-card option-card"
+                      disabled={busy}
+                      key={option.id}
+                      onClick={() => handleIdentifyOption(option.id)}
+                      type="button"
+                    >
+                      <option.icon />
+                      <span className="card-label">
+                        {option.label}
+                      </span>
+                      <CornerTick />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </Screen>
+          ) : null}
+
+          {step === "service-selection" ? (
+            <Screen>
+              <TitleBlock eyebrow="Welcome">
+                What brings you to
+                <br />
+                Innovation City today?
+              </TitleBlock>
+              <div className="options-section">
+                <Divider>Talk to the assistant or select an option</Divider>
+                <div className="card-grid">
+                  {serviceCards.map((card) => (
+                    <button
+                      className="glass-card service-card"
+                      disabled={busy}
+                      key={card.id}
+                      onClick={() => handleServiceSelect(card.id)}
+                      type="button"
+                    >
+                      <card.icon />
+                      <span className="service-title">{card.title}</span>
+                      <span className="service-copy">{card.description}</span>
+                      <CornerTick />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </Screen>
+          ) : null}
+
+          {step === "profile-lookup" ? (
+            <Screen onBack={() => setStep("identify")}>
+              <TitleBlock eyebrow="Check in">Find your profile</TitleBlock>
+              <p className="screen-copy">Enter your details so we can find your profile.</p>
+              <form className="stack" onSubmit={handleProfileLookup}>
+                <Panel>
+                  <Field
+                    icon={<User />}
+                    label="Full name"
+                    onChange={(event) => setLookup((value) => ({ ...value, full_name: event.target.value }))}
+                    placeholder="Enter your full name"
+                    required
+                    value={lookup.full_name}
+                  />
+                  <Field
+                    icon={<Phone />}
+                    label="Mobile number"
+                    onChange={(event) => setLookup((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
+                    placeholder="50 123 4567"
+                    required
+                    value={lookup.mobile_number}
+                    leadingAddon={
+                      <CountryCodeSelect
+                        onChange={(countryCode) => setLookup((value) => ({ ...value, country_code: countryCode }))}
+                        value={lookup.country_code}
+                      />
                     }
                   />
-                )}
-              </Screen>
-            ) : null}
+                </Panel>
+                <PrimaryButton disabled={busy} type="submit">Continue</PrimaryButton>
+                <p className="inline-note">
+                  Don&rsquo;t have a profile?{" "}
+                  <button onClick={handleRegisterLink} type="button">Create one</button>
+                </p>
+              </form>
+            </Screen>
+          ) : null}
 
-            {step === "welcome-back" ? (
-              <Screen>
-                <ScreenTitle title={`Welcome Back, ${firstName}`} />
-                <p className="screen-copy">It's great to see you again.</p>
+          {step === "register" ? (
+            <Screen onBack={() => setStep("identify")}>
+              <TitleBlock eyebrow="New profile">Create your profile</TitleBlock>
+              <p className="screen-copy">Fill in your details, or tell the assistant.</p>
+              <form className="stack" onSubmit={handleRegistration}>
+                <Panel>
+                  <Field
+                    label="Full name"
+                    onChange={(event) => setRegistration((value) => ({ ...value, full_name: event.target.value }))}
+                    placeholder="Enter your name"
+                    required
+                    value={registration.full_name}
+                  />
+                  <Field
+                    label="Mobile number"
+                    onChange={(event) => setRegistration((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
+                    placeholder="50 123 4567"
+                    required
+                    value={registration.mobile_number}
+                    leadingAddon={
+                      <CountryCodeSelect
+                        onChange={(countryCode) => setRegistration((value) => ({ ...value, country_code: countryCode }))}
+                        value={registration.country_code}
+                      />
+                    }
+                  />
+                  <Field
+                    label="Email address"
+                    onChange={(event) => setRegistration((value) => ({ ...value, email: event.target.value }))}
+                    placeholder="name@company.com"
+                    required
+                    type="email"
+                    value={registration.email}
+                  />
+                  <div className="toggle-field">
+                    <span>I am visiting as</span>
+                    <div className="segmented-toggle">
+                      {(["client", "visitor"] as const).map((type) => (
+                        <button
+                          className={registration.visitor_type === type ? "active" : ""}
+                          key={type}
+                          onClick={() => setRegistration((value) => ({ ...value, visitor_type: type }))}
+                          type="button"
+                        >
+                          {type === "client" ? "Client" : "Visitor"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </Panel>
+                <PrimaryButton disabled={busy} type="submit">Continue</PrimaryButton>
+              </form>
+            </Screen>
+          ) : null}
+
+          {step === "facial-consent" ? (
+            <Screen>
+              <TitleBlock eyebrow="Faster check-in">
+                Recognise me
+                <br />
+                next time?
+              </TitleBlock>
+              <p className="screen-copy">A face scan lets the kiosk welcome you by name on your next visit.</p>
+              <button className="glass-card consent-card" onClick={() => setConsentChecked((value) => !value)} type="button">
+                <span className="check-box">{consentChecked ? <Check /> : null}</span>
+                <span>I understand and consent to using facial recognition for future check-ins.</span>
+              </button>
+              <PrimaryButton disabled={busy || !consentChecked} onClick={() => handleConsent(true)}>
+                Yes, enable face check-in
+              </PrimaryButton>
+              <OutlineButton disabled={busy} onClick={() => handleConsent(false)}>
+                Continue without face scan
+              </OutlineButton>
+            </Screen>
+          ) : null}
+
+          {step === "scan-progress" && !kycPhase ? (
+            // Only visible if the scanner isn't open (e.g. camera failed
+            // before it could start) -- normally the scanner covers this.
+            <Screen>
+              <TitleBlock eyebrow="Face scan">Face scan</TitleBlock>
+              {enrollmentError ? <StatusBanner tone="error" message={enrollmentError} /> : null}
+              <PrimaryButton
+                disabled={busy}
+                onClick={() => {
+                  kycCancelledRef.current = false;
+                  setKycMode("enroll");
+                  setKycPhase("starting");
+                }}
+              >
+                Scan again
+              </PrimaryButton>
+              <OutlineButton disabled={busy} onClick={skipFaceEnrollment}>Continue without face scan</OutlineButton>
+            </Screen>
+          ) : null}
+
+          {step === "welcome-back" ? (
+            <Screen>
+              <TitleBlock eyebrow="Welcome back">
+                Good to see you,
+                <br />
+                {firstName}
+              </TitleBlock>
+              <Panel>
                 {currentBookings.length > 0 ? (
-                  <Panel>
+                  <>
                     <div className="mini-heading">
                       <CalendarDays />
                       <div>
-                        <strong>{currentBookings.length === 1 ? "Booking" : "Bookings"}</strong>
-                        <span>
-                          {currentBookings.length === 1
-                            ? "You have a booking today."
-                            : `You have ${currentBookings.length} bookings today.`}
-                        </span>
+                        <strong>{currentBookings.length === 1 ? "Your booking today" : `Your ${currentBookings.length} bookings today`}</strong>
+                        <span>Use Find a place for directions to your room.</span>
                       </div>
                     </div>
                     <div className="booking-summary-list">
                       {currentBookings.map((booking) => (
                         <div className="booking-summary-item" key={booking.booking_id}>
-                          <b>{formatTime(booking.booking_time_start)} - {formatTime(booking.booking_time_end)}</b>
+                          <b>{formatTime(booking.booking_time_start)} – {formatTime(booking.booking_time_end)}</b>
                           <span>{booking.room_name}</span>
                         </div>
                       ))}
                     </div>
-                    <p className="panel-copy">You can access the map screen for guidance to your room.</p>
-                  </Panel>
+                  </>
                 ) : (
-                  <Panel>
-                    <strong>No booking found for today.</strong>
-                    <p className="panel-copy">You can continue to the service options below.</p>
-                  </Panel>
+                  <>
+                    <strong>No bookings today</strong>
+                    <p className="panel-copy">Talk to the assistant or pick a service to get started.</p>
+                  </>
                 )}
-                <PrimaryButton onClick={() => setStep(currentBookings.length > 0 ? "thank-you" : "service-selection")}>
-                  Finish
-                </PrimaryButton>
-                <PageVoiceButton onClick={() => setVoiceOpen(true)} />
-                <OutlineButton onClick={() => setStep("service-selection")}>Other Services</OutlineButton>
-              </Screen>
-            ) : null}
+              </Panel>
+              <PrimaryButton onClick={() => setStep(currentBookings.length > 0 ? "thank-you" : "service-selection")}>
+                {currentBookings.length > 0 ? "Finish" : "See services"}
+              </PrimaryButton>
+              {currentBookings.length > 0 ? (
+                <OutlineButton onClick={() => setStep("service-selection")}>Other services</OutlineButton>
+              ) : null}
+            </Screen>
+          ) : null}
 
-            {step === "service-selection" ? (
-              <Screen>
-                <ScreenTitle title="How Can We Help You?" />
-                <p className="screen-copy">Please select an option below.</p>
-                <div className="service-grid">
-                  {serviceCards.map((card) => (
-                    <button className="service-card" key={card.id} onClick={() => handleServiceSelect(card.id)} type="button">
-                      <span className="service-icon"><card.icon /></span>
-                      <strong>{card.title}</strong>
-                      <span>{card.description}</span>
-                    </button>
-                  ))}
-                </div>
-              </Screen>
-            ) : null}
+          {step === "room-select" ? (
+            <Screen onBack={() => setStep("service-selection")}>
+              <TitleBlock eyebrow="Booking">Choose your room</TitleBlock>
+              <div className="room-choice-list">
+                {(["MR_1", "MR_2"] as const).map((zoneId) => (
+                  <RoomChoiceCard
+                    description={roomDescription(zoneId)}
+                    facts={ROOM_FACTS[zoneId]}
+                    key={zoneId}
+                    label={zoneId === "MR_1" ? "Meeting Room 1" : "Meeting Room 2"}
+                    onChoose={() => {
+                      setBookingForm((value) => ({ ...value, zoneId }));
+                      setStep("booking");
+                    }}
+                    selected={bookingForm.zoneId === zoneId}
+                    src={ROOM_PHOTOS[zoneId]}
+                  />
+                ))}
+              </div>
+            </Screen>
+          ) : null}
 
-            {step === "booking" || step === "booking-podcast" || step === "booking-tiktok" ? (
-              <Screen>
-                <ScreenTitle title={bookingTitle} />
-                <p className="screen-copy">Verify details and reserve your slot.</p>
-                <BookingFormPanel
-                  bookingForm={bookingForm}
-                  busy={busy}
-                  onBack={() => setStep("service-selection")}
-                  onChange={setBookingForm}
-                  onSubmit={handleBooking}
-                  service={selectedService}
-                />
-              </Screen>
-            ) : null}
+          {step === "booking" || step === "booking-podcast" || step === "booking-tiktok" ? (
+            <Screen onBack={() => setStep(step === "booking" ? "room-select" : "service-selection")}>
+              <TitleBlock eyebrow="Booking">{bookingTitle}</TitleBlock>
+              <BookingFormPanel
+                bookingForm={bookingForm}
+                busy={busy}
+                onChange={setBookingForm}
+                onSubmit={handleBooking}
+                service={selectedService}
+              />
+            </Screen>
+          ) : null}
 
-            {step === "events" ? (
-              <Screen scroll>
-                <ScreenTitle title="Today's Events" />
-                <p className="screen-copy">Select an event taking place today at the hub.</p>
-                <div className="event-list">
-                  {events.length === 0 ? <Panel>No events are scheduled for today.</Panel> : null}
-                  {events.map((eventItem) => (
-                    <button
-                      className={["event-card", selectedEvent?.event_id === eventItem.event_id ? "event-card-selected" : ""].join(" ")}
-                      key={eventItem.event_id}
-                      onClick={() => setSelectedEvent(eventItem)}
-                      type="button"
-                    >
-                      <strong>{eventItem.event_name}</strong>
-                      <span>{formatTime(eventItem.event_time_start)} - {eventItem.event_location}</span>
-                      <b>Select</b>
-                    </button>
-                  ))}
-                </div>
-                {selectedEvent ? (
-                  <div className="selected-event">Selected: {selectedEvent.event_name}. Please be seated 10 minutes before the event starts.</div>
-                ) : null}
-                <PrimaryButton disabled={busy || !selectedEvent} onClick={handleEventRegistration}>
-                  Submit Event Registration
-                </PrimaryButton>
-                <OutlineButton onClick={() => setStep("service-selection")}>Back</OutlineButton>
-              </Screen>
-            ) : null}
+          {step === "events" ? (
+            <Screen scroll onBack={() => setStep("service-selection")}>
+              <TitleBlock eyebrow="Events">Today&rsquo;s events</TitleBlock>
+              <div className="event-list">
+                {events.length === 0 ? <Panel><strong>No events are scheduled for today.</strong></Panel> : null}
+                {events.map((eventItem) => (
+                  <button
+                    className={["glass-card", "event-card", selectedEvent?.event_id === eventItem.event_id ? "selected" : ""].join(" ")}
+                    key={eventItem.event_id}
+                    onClick={() => setSelectedEvent(eventItem)}
+                    type="button"
+                  >
+                    <strong>{eventItem.event_name}</strong>
+                    <span>{formatTime(eventItem.event_time_start)} · {eventItem.event_location}</span>
+                    <CornerTick />
+                  </button>
+                ))}
+              </div>
+              {selectedEvent ? (
+                <p className="screen-copy">Please be seated 10 minutes before {selectedEvent.event_name} starts.</p>
+              ) : null}
+              <PrimaryButton disabled={busy || !selectedEvent} onClick={handleEventRegistration}>
+                Register for event
+              </PrimaryButton>
+            </Screen>
+          ) : null}
 
-            {step === "center" ? (
-              <Screen scroll>
-                <ScreenTitle title="Explore the Center" />
-                <p className="screen-copy">Voice assistance is ready. Ask about any room on the floor.</p>
-                <VoiceOrb />
-                <div className="room-info-list">
-                  {centerRoomOptions.map((option) => (
-                    <div className="room-info" key={option.title}>
-                      <strong>{option.title}</strong>
-                      <span>{option.description}</span>
-                    </div>
-                  ))}
-                </div>
-                <PrimaryButton onClick={() => setVoiceOpen(true)} icon={<SkyIcon size={18} />}>Start Voice Assistance</PrimaryButton>
-                <OutlineButton onClick={() => setStep("service-selection")}>Back</OutlineButton>
-              </Screen>
-            ) : null}
+          {step === "center" ? (
+            <Screen scroll onBack={() => setStep("service-selection")}>
+              <TitleBlock eyebrow="Find a place">Explore the center</TitleBlock>
+              <p className="screen-copy">Ask Sky about any room on the floor, or browse below.</p>
+              <div className="room-info-list">
+                {centerRoomOptions.map((option) => (
+                  <div className="glass-card room-info" key={option.title}>
+                    <strong>{option.title}</strong>
+                    <span>{option.description}</span>
+                  </div>
+                ))}
+              </div>
+              {!voiceOpen ? (
+                <PrimaryButton onClick={() => setVoiceOpen(true)} icon={<Mic />}>Ask Sky</PrimaryButton>
+              ) : null}
+            </Screen>
+          ) : null}
 
-            {step === "other" ? (
-              <Screen>
-                <ScreenTitle title="How Can We Help You?" />
-                <p className="screen-copy">Please select the reason for your visit.</p>
-                <form className="stack" onSubmit={handleOtherSubmit}>
-                  <select className="select-field" value={otherReason} onChange={(event) => setOtherReason(event.target.value)}>
-                    <option value="start_company">Start your company</option>
-                    <option value="free_zone_questions">Free zone or company setup questions</option>
-                    <option value="document_creation_renewal">Document creation or renewal</option>
-                  </select>
+          {step === "other" ? (
+            <Screen onBack={() => setStep("service-selection")}>
+              <TitleBlock eyebrow="Support">How can we help?</TitleBlock>
+              <form className="stack" onSubmit={handleOtherSubmit}>
+                <Panel>
+                  <KioskSelect
+                    label="Reason for your visit"
+                    onChange={setOtherReason}
+                    options={[
+                      { value: "start_company", label: "Start your company" },
+                      { value: "free_zone_questions", label: "Free zone or company setup questions" },
+                      { value: "document_creation_renewal", label: "Document creation or renewal" },
+                    ]}
+                    value={otherReason}
+                  />
                   <TextAreaField
-                    label="Notes for CX"
+                    label="Notes for the CX team"
                     onChange={(event) => setOtherNotes(event.target.value)}
-                    placeholder="Add any details we should remember for next time"
+                    placeholder="Anything we should know"
                     value={otherNotes}
                   />
-                  <PageVoiceButton onClick={() => setVoiceOpen(true)} />
-                  <PrimaryButton disabled={busy} type="submit">Submit and Continue to CX Team</PrimaryButton>
-                  <OutlineButton onClick={() => setStep("service-selection")} type="button">Back</OutlineButton>
-                </form>
-              </Screen>
-            ) : null}
+                </Panel>
+                <PrimaryButton disabled={busy} type="submit">Send to CX team</PrimaryButton>
+              </form>
+            </Screen>
+          ) : null}
 
-            {step === "thank-you" ? (
-              <Screen>
-                <div className="thank-icon"><BriefcaseBusiness /></div>
-                <ScreenTitle title="Thank You for Your Visit!" center />
-                <p className="screen-copy text-center">We hope you enjoy your time at Innovation City.</p>
-                <PrimaryButton onClick={resetFlow} icon={<Home />}>Return to Home</PrimaryButton>
-                <p className="tiny-note">This screen will return to home automatically.</p>
-              </Screen>
-            ) : null}
-          </div>
-          <FooterHelp />
-        </div>
-      </section>
-      <VoiceAssistant
-        open={voiceOpen}
-        onClose={() => setVoiceOpen(false)}
-        knownVisitor={
-          visitor
-            ? { visitor_id: visitor.visitor_id, visitor_name: visitor.visitor_name, visitor_type: visitor.visitor_type }
-            : null
-        }
-        onNeedFaceEnrollment={handleVoiceFaceEnrollment}
-        onFormFieldUpdate={handleVoiceFormFieldUpdate}
-      />
+          {step === "report-issue" ? (
+            <Screen onBack={() => setStep("identify")}>
+              <TitleBlock eyebrow="Recognition issue">
+                We&rsquo;re sorry
+                <br />
+                about that
+              </TitleBlock>
+              <p className="screen-copy">
+                Something didn&rsquo;t go right with recognising you. We&rsquo;d love to hear what happened so we can
+                fix it.
+              </p>
+              <form className="stack" onSubmit={handleIssueSubmit}>
+                <Panel>
+                  <TextAreaField
+                    label="Tell us what happened"
+                    maxLength={1000}
+                    onChange={(event) => setIssueText(event.target.value)}
+                    placeholder="For example: it showed someone else's profile, or it didn't find mine."
+                    rows={6}
+                    value={issueText}
+                  />
+                </Panel>
+                <PrimaryButton disabled={busy || !issueText.trim()} type="submit">
+                  Send
+                </PrimaryButton>
+              </form>
+            </Screen>
+          ) : null}
 
-      {facecheckSuggestions ? (
-        <div className="voice-modal confirmation-modal">
-          <div className="confirmation-card suggestions-card">
-            <h2>Is This You?</h2>
-            <p>We searched publicly available photos and found a few possible matches. Tap yours, or let us know if none match.</p>
-            <div className="suggestion-grid">
-              {facecheckSuggestions.map((candidate) => (
-                <button
-                  className="suggestion-option"
-                  disabled={busy}
-                  key={candidate.rank}
-                  onClick={handleFaceCheckRespond}
+          {step === "thank-you" ? (
+            <Screen hero>
+              <div className="hero-texts">
+                {thankYouKind === "report" ? (
+                  <>
+                    <h1 className="screen-title">
+                      Thanks for
+                      <br />
+                      letting us know
+                    </h1>
+                    <p className="hero-copy">Our team will look into it. We&rsquo;re sorry for the trouble.</p>
+                  </>
+                ) : (
+                  <>
+                    <h1 className="screen-title">
+                      Thank you
+                      <br />
+                      for visiting
+                    </h1>
+                    <p className="hero-copy">Enjoy your time at Innovation City.</p>
+                  </>
+                )}
+              </div>
+              <PrimaryButton onClick={finishVisit}>Start over now</PrimaryButton>
+              {/* Below the button on purpose: when it ends, the logo circle
+                  flies *up* into the welcome screen's big logo. */}
+              <div className="thank-countdown">
+                <LogoCountdown seconds={AUTO_RETURN_SECONDS} secondsLeft={secondsLeft} />
+              </div>
+            </Screen>
+          ) : null}
+        </section>
+
+        <VoiceAssistant
+          open={voiceOpen}
+          onClose={() => setVoiceOpen(false)}
+          knownVisitor={
+            visitor
+              ? { visitor_id: visitor.visitor_id, visitor_name: visitor.visitor_name, visitor_type: visitor.visitor_type }
+              : null
+          }
+          onNeedFaceEnrollment={handleVoiceFaceEnrollment}
+          onFormFieldUpdate={handleVoiceFormFieldUpdate}
+          onSkyStateChange={setSkyState}
+        />
+
+        <BottomNav
+          firstTab={onStart ? "plan" : "home"}
+          onFirstTab={onStart ? () => setStep("service-selection") : goHome}
+          onFindPlace={() => setStep("center")}
+          onSky={handleSkyPress}
+          skyState={skyState}
+        />
+
+        {quickRegister ? (
+          <div className="frame-modal" onClick={(event) => event.target === event.currentTarget && setQuickRegister(null)}>
+            <form className="quick-register" onSubmit={handleQuickRegister}>
+              <div className="qr-head">
+                <span className="eyebrow">
+                  <EyebrowMark />
+                  {quickRegister.action === "booking" ? "Almost there" : "One more step"}
+                </span>
+                <h2>{quickRegister.tab === "new" ? "Quick registration" : "Find your profile"}</h2>
+                <p>
+                  {quickRegister.action === "booking"
+                    ? "Your chosen time is saved — we just need your details to confirm the booking."
+                    : "We just need your details to register you for the event."}
+                </p>
+              </div>
+
+              <div className="segmented-toggle qr-tabs" role="tablist">
+                {(["new", "existing"] as const).map((tab) => (
+                  <button
+                    aria-selected={quickRegister.tab === tab}
+                    className={quickRegister.tab === tab ? "active" : ""}
+                    key={tab}
+                    onClick={() => {
+                      setError(null);
+                      setQuickRegister({ ...quickRegister, tab });
+                    }}
+                    role="tab"
+                    type="button"
+                  >
+                    {tab === "new" ? "I'm new" : "I have a profile"}
+                  </button>
+                ))}
+              </div>
+
+              {error ? <StatusBanner tone="error" message={error} /> : null}
+
+              {quickRegister.tab === "new" ? (
+                <div className="qr-fields">
+                  <Field
+                    label="Full name"
+                    onChange={(event) => setRegistration((value) => ({ ...value, full_name: event.target.value }))}
+                    placeholder="Enter your name"
+                    required
+                    value={registration.full_name}
+                  />
+                  <Field
+                    label="Mobile number"
+                    leadingAddon={
+                      <CountryCodeSelect
+                        onChange={(countryCode) => setRegistration((value) => ({ ...value, country_code: countryCode }))}
+                        value={registration.country_code}
+                      />
+                    }
+                    onChange={(event) => setRegistration((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
+                    placeholder="50 123 4567"
+                    required
+                    value={registration.mobile_number}
+                  />
+                  <Field
+                    label="Email address"
+                    onChange={(event) => setRegistration((value) => ({ ...value, email: event.target.value }))}
+                    placeholder="name@company.com"
+                    required
+                    type="email"
+                    value={registration.email}
+                  />
+                  <div className="toggle-field">
+                    <span>I am visiting as</span>
+                    <div className="segmented-toggle">
+                      {(["client", "visitor"] as const).map((type) => (
+                        <button
+                          className={registration.visitor_type === type ? "active" : ""}
+                          key={type}
+                          onClick={() => setRegistration((value) => ({ ...value, visitor_type: type }))}
+                          type="button"
+                        >
+                          {type === "client" ? "Client" : "Visitor"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="qr-fields">
+                  <Field
+                    icon={<User />}
+                    label="Full name"
+                    onChange={(event) => setLookup((value) => ({ ...value, full_name: event.target.value }))}
+                    placeholder="Enter your full name"
+                    required
+                    value={lookup.full_name}
+                  />
+                  <Field
+                    label="Mobile number"
+                    leadingAddon={
+                      <CountryCodeSelect
+                        onChange={(countryCode) => setLookup((value) => ({ ...value, country_code: countryCode }))}
+                        value={lookup.country_code}
+                      />
+                    }
+                    onChange={(event) => setLookup((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
+                    placeholder="50 123 4567"
+                    required
+                    value={lookup.mobile_number}
+                  />
+                </div>
+              )}
+
+              <div className="pass-actions">
+                <OutlineButton
+                  onClick={() => {
+                    setError(null);
+                    setQuickRegister(null);
+                  }}
                   type="button"
                 >
-                  <span className="suggestion-photo">
-                    {candidate.thumbnail_base64 ? (
-                      <img alt={`Possible match ${candidate.rank}`} src={candidate.thumbnail_base64} />
-                    ) : (
-                      candidate.rank
-                    )}
-                  </span>
-                  {typeof candidate.score === "number" ? (
-                    <span
-                      className="suggestion-score"
-                      style={{ fontSize: "0.8rem", opacity: 0.7, display: "block", marginTop: "2px" }}
-                    >
-                      {Math.round(candidate.score * 100)}% match
-                    </span>
-                  ) : null}
-                  <span className="suggestion-name">Yes, this is me</span>
-                </button>
-              ))}
-            </div>
-            <OutlineButton disabled={busy} onClick={handleFaceCheckRespond}>
-              None of these — Continue to Registration
-            </OutlineButton>
+                  Cancel
+                </OutlineButton>
+                <PrimaryButton disabled={busy} type="submit">
+                  {quickRegister.action === "booking" ? "Confirm booking" : "Join event"}
+                </PrimaryButton>
+              </div>
+            </form>
           </div>
-        </div>
-      ) : null}
+        ) : null}
 
-      {confirmation ? (
-        <div className="voice-modal confirmation-modal">
-          <div className="confirmation-card">
-            <h2>{confirmation.title}</h2>
-            <p>{confirmation.message}</p>
-            <PrimaryButton onClick={finishConfirmedAction}>Done</PrimaryButton>
-            <OutlineButton onClick={continueToServices}>Back to Other Services</OutlineButton>
+        {kycPhase ? (
+          <FaceScanOverlay
+            onCameraError={(message) => {
+              setError(message);
+              setKycPhase("error");
+            }}
+            errorActions={
+              kycMode === "enroll" ? (
+                <>
+                  <PrimaryButton
+                    disabled={busy}
+                    onClick={() => {
+                      kycCancelledRef.current = false;
+                      if (kycStreamRef.current) runKycEnroll(kycStreamRef.current);
+                    }}
+                  >
+                    Scan again
+                  </PrimaryButton>
+                  <OutlineButton
+                    disabled={busy}
+                    onClick={() => {
+                      setKycPhase(null);
+                      skipFaceEnrollment();
+                    }}
+                  >
+                    Continue without face scan
+                  </OutlineButton>
+                </>
+              ) : undefined
+            }
+            mode={kycMode}
+            onCancel={cancelKycScan}
+            onStream={handleKycStream}
+            phase={kycPhase}
+            scanMs={KYC_SCAN_MS}
+          />
+        ) : null}
+
+        {confirmation ? (
+          <div className="frame-modal">
+            <div className="pass-stack">
+              <VisitorPass pass={confirmation.pass} />
+              <LogoCountdown seconds={PASS_RETURN_SECONDS} secondsLeft={secondsLeft} />
+              <div className="pass-actions">
+                <OutlineButton onClick={continueToServices}>Book something else</OutlineButton>
+                <PrimaryButton onClick={finishVisit}>Done</PrimaryButton>
+              </div>
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </main>
   );
 }
 
-function TopBar() {
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Counts down from `seconds` while `active`, then calls `onDone` once.
+ * `restartKey` restarts the count when a new finish moment replaces the
+ * old one. Measured against the clock (not tick counts) so a busy main
+ * thread can't stretch the 5 seconds.
+ */
+function useCountdown(active: boolean, seconds: number, onDone: () => void, restartKey: unknown) {
+  const [left, setLeft] = useState(seconds);
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
+
+  useEffect(() => {
+    setLeft(seconds);
+    if (!active) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const remaining = seconds - Math.floor((Date.now() - startedAt) / 1000);
+      if (remaining <= 0) {
+        window.clearInterval(timer);
+        onDoneRef.current();
+      } else {
+        setLeft(remaining);
+      }
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [active, seconds, restartKey]);
+
+  return left;
+}
+
+function suggestionLabel(candidate: FaceCheckSuggestion) {
+  if (candidate.name) return candidate.name;
+  // FaceCheckID returns a source page, not a name -- show its site instead.
+  try {
+    return new URL(candidate.source_url).hostname.replace(/^www\./, "");
+  } catch {
+    return `Match ${candidate.rank}`;
+  }
+}
+
+function KioskBackdrop({ photo }: { photo?: string }) {
+  // "Brand aurora": soft clouds of the logo's cyan and purple drifting over
+  // deep navy -- the same on every screen. Each cloud only moves/scales
+  // (GPU-cheap); they pause while the voice assistant is on (see
+  // .kiosk-frame[data-voice] in the CSS).
+  return (
+    <div aria-hidden className="kiosk-backdrop">
+      <div className="aurora" data-paused={photo ? "true" : "false"}>
+        <span className="aurora-blob a1" />
+        <span className="aurora-blob a2" />
+        <span className="aurora-blob a3" />
+        <span className="aurora-blob a4" />
+      </div>
+      {/* Booking screens: the chosen room's photo, softly blurred, sets the
+          mood behind the form. Keyed so switching rooms cross-fades. */}
+      {photo ? <PhotoImg alt="" className="backdrop-photo" key={photo} src={photo} /> : null}
+      <div className="kiosk-backdrop-shade" />
+    </div>
+  );
+}
+
+function TopBar({ showBrand, morphMark }: { showBrand: boolean; morphMark: boolean }) {
   const [now, setNow] = useState(new Date());
   const [weather, setWeather] = useState<{ temp: number } | null>(null);
 
-  // Live clock -- ticks every second so the displayed time is always real,
-  // not a snapshot from when the page loaded.
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // Real weather via Open-Meteo (free, no API key). Coordinates are Ras Al
-  // Khaimah, UAE -- update these if Innovation City is elsewhere. Weather
-  // doesn't need second-by-second freshness, so this only refreshes every
-  // 15 minutes, and fails silently (header still shows date/time) if the
-  // request doesn't succeed.
+  // Open-Meteo (free, no key) for Ras Al Khaimah. Refreshes every 15 min
+  // and fails silently -- the header still shows date/time without it.
   useEffect(() => {
     let cancelled = false;
     async function loadWeather() {
       try {
         const res = await fetch(
-          "https://api.open-meteo.com/v1/forecast?latitude=25.7895&longitude=55.9432&current_weather=true"
+          "https://api.open-meteo.com/v1/forecast?latitude=25.7895&longitude=55.9432&current_weather=true",
         );
         const data = await res.json();
         if (!cancelled && data?.current_weather) {
           setWeather({ temp: Math.round(data.current_weather.temperature) });
         }
       } catch {
-        // Weather is a nice-to-have -- the header still works without it.
+        // nice-to-have only
       }
     }
     loadWeather();
@@ -1252,125 +1971,152 @@ function TopBar() {
     };
   }, []);
 
-  // Explicit timeZone so the header is correct even if the kiosk machine's
-  // own OS clock/timezone setting is ever wrong.
   const timeZone = "Asia/Dubai";
-  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone });
-  // Abbreviated to 3 letters (SUN, MON, ...) -- this header now also has to
-  // fit a centered logo on a narrow portrait kiosk screen, leaving much
-  // less room than a plain weather+clock bar would, so the longest day
-  // names ("WEDNESDAY") can't be spelled out without forcing truncation.
-  const dayName = now.toLocaleDateString("en-US", { weekday: "short", timeZone }).toUpperCase();
-  const monthDayStr = now.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone }).toUpperCase();
-
-  const ACCENT = "#8fb1ff";
-
-  const dimTextStyle: React.CSSProperties = {
-    fontSize: "7px",
-    letterSpacing: "0",
-    color: "#8b93a8",
-    marginTop: "2px",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  };
-  const valueTextStyle: React.CSSProperties = {
-    fontSize: "15px",
-    fontWeight: 600,
-    color: "#f5f7fb",
-    whiteSpace: "nowrap",
-  };
-  const dividerStyle: React.CSSProperties = {
-    width: "1px",
-    height: "30px",
-    background: "rgba(255,255,255,0.15)",
-    flexShrink: 0,
-  };
+  const time = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone });
+  const day = now.toLocaleDateString("en-US", { weekday: "long", timeZone });
+  const date = now.toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone });
 
   return (
-    <header className="top-bar" style={{ padding: "10px 8px", width: "100%", boxSizing: "border-box" }}>
-      <div
-        style={{
-          // Logo dropped to 26px height (was 32px) -- the previous 32px
-          // calculation assumed a 400px-wide kiosk, but the actual
-          // reference frame this design is based on is 360px, which
-          // leaves meaningfully less room. Recalculated against 360px
-          // this time for a real ~13px margin instead of guessing again.
-          display: "grid",
-          gridTemplateColumns: "1.15fr auto 0.85fr",
-          alignItems: "center",
-          columnGap: "10px",
-          width: "100%",
-          boxSizing: "border-box",
-          border: "1px solid rgba(255,255,255,0.14)",
-          borderRadius: "12px",
-          background: "rgba(255,255,255,0.03)",
-          padding: "10px 12px",
-        }}
-      >
-        {/* justifyContent: flex-start now hugs the temperature to the
-            OUTER left edge of the pill, with the divider trailing behind
-            it (whatever slack space exists sits between the text and the
-            divider/logo, not between the text and the pill's edge). */}
-        <div style={{ minWidth: 0, textAlign: "left", display: "flex", alignItems: "center", justifyContent: "flex-start" }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={valueTextStyle}>{weather ? `${weather.temp}°C` : "--°C"}</div>
-            <div style={dimTextStyle}>
-              <span style={{ color: ACCENT }}>UAE</span> | RAS AL KHAIMAH
-            </div>
-          </div>
-          <div style={{ ...dividerStyle, marginLeft: "10px" }} />
-        </div>
-
-        <div className="brand" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <img
-            alt="Innovation City"
-            src="/brand/innovation-city-mark.png"
-            style={{ height: "22px", width: "auto" }}
-          />
-        </div>
-
-        {/* justifyContent: flex-end hugs the time to the OUTER right edge
-            of the pill, mirroring the weather side. */}
-        <div style={{ minWidth: 0, textAlign: "right", display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
-          <div style={{ ...dividerStyle, marginRight: "10px" }} />
-          <div style={{ minWidth: 0 }}>
-            <div style={valueTextStyle}>{timeStr}</div>
-            <div style={dimTextStyle}>
-              <span style={{ color: ACCENT }}>{dayName}</span> | {monthDayStr}
-            </div>
-          </div>
-        </div>
+    <header className="top-bar">
+      {showBrand ? <HeaderBrand morphMark={morphMark} /> : null}
+      <div className="top-block">
+        <p className="top-value">{weather ? `${weather.temp} C°` : "-- C°"}</p>
+        <p className="top-meta">
+          <span>UAE</span>
+          <i />
+          <span className="dim">Ras Al Khaimah</span>
+        </p>
+      </div>
+      <div className="top-block end">
+        <p className="top-value">{time}</p>
+        <p className="top-meta">
+          <span>{day}</span>
+          <i />
+          <span className="dim">{date}</span>
+        </p>
       </div>
     </header>
   );
 }
 
-function FooterHelp() {
+function BottomNav({
+  firstTab,
+  onFirstTab,
+  onFindPlace,
+  onSky,
+  skyState,
+}: {
+  firstTab: "plan" | "home";
+  onFirstTab: () => void;
+  onFindPlace: () => void;
+  onSky: () => void;
+  skyState: SkyState;
+}) {
+  const active = skyState !== "off";
   return (
-    <footer className="footer-help">
-      <p>Please ask an Innovation Hub associate if you require assistance.</p>
-    </footer>
+    <nav className="bottom-nav">
+      <div className="bottom-nav-row">
+        <button className="nav-tab" onClick={onFirstTab} type="button">
+          <span className="nav-icon">{firstTab === "plan" ? <PlanVisitIcon /> : <HomeIcon />}</span>
+          <span className="nav-label">{firstTab === "plan" ? "Plan your visit" : "Home"}</span>
+        </button>
+        <button
+          aria-label={active ? "Stop the AI voice assistant" : "Start the AI voice assistant"}
+          aria-pressed={active}
+          className={active ? "nav-tab sky active" : "nav-tab sky"}
+          onClick={onSky}
+          type="button"
+        >
+          <span className="nav-icon sky-slot">
+            <SkyFace height={220} state={skyState} />
+          </span>
+          <span className="nav-label">AI voice assistant</span>
+        </button>
+        <button className="nav-tab" onClick={onFindPlace} type="button">
+          <span className="nav-icon"><FindPlaceIcon /></span>
+          <span className="nav-label">Find a place</span>
+        </button>
+      </div>
+    </nav>
   );
 }
 
-function Screen({ children, scroll = false }: { children: React.ReactNode; scroll?: boolean }) {
-  return <div className={scroll ? "screen screen-scroll" : "screen"}>{children}</div>;
+function Eyebrow({ label }: { label: string }) {
+  return (
+    <span className="eyebrow">
+      <EyebrowMark />
+      {label}
+    </span>
+  );
 }
 
-function ScreenTitle({ title, center = false, fontSize }: { title: string; center?: boolean; fontSize?: string }) {
+function TitleBlock({ eyebrow, children }: { eyebrow: string; children: React.ReactNode }) {
   return (
-    <h1
-      className={center ? "screen-title text-center" : "screen-title"}
-      style={fontSize ? { fontSize, whiteSpace: "nowrap" } : undefined}
-    >
-      {title}
-    </h1>
+    <div className="title-block">
+      <Eyebrow label={eyebrow} />
+      <h1 className="screen-title">{children}</h1>
+    </div>
+  );
+}
+
+function Divider({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="divider">
+      <i />
+      <span>{children}</span>
+      <i />
+    </p>
+  );
+}
+
+function CornerTick() {
+  return (
+    <span aria-hidden className="corner-tick">
+      <i />
+      <i />
+    </span>
+  );
+}
+
+function Screen({
+  children,
+  hero = false,
+  scroll = false,
+  onBack,
+}: {
+  children: React.ReactNode;
+  hero?: boolean;
+  scroll?: boolean;
+  /** Shows the back arrow at the top-left of the panel. */
+  onBack?: () => void;
+}) {
+  return (
+    <div className={["screen", hero ? "screen-hero" : "", scroll ? "screen-scroll" : ""].filter(Boolean).join(" ")}>
+      <div className="screen-body">
+        {onBack ? (
+          <button
+            aria-label="Back"
+            className="back-btn"
+            onClick={() => {
+              navigateBack();
+              onBack();
+            }}
+            type="button"
+          >
+            <span className="back-circle">
+              <ArrowLeft aria-hidden />
+            </span>
+            <span className="back-label">Back</span>
+          </button>
+        ) : null}
+        {children}
+      </div>
+    </div>
   );
 }
 
 function Panel({ children, compact = false }: { children: React.ReactNode; compact?: boolean }) {
-  return <div className={compact ? "panel panel-compact" : "panel"}>{children}</div>;
+  return <div className={compact ? "glass-card panel compact" : "glass-card panel"}>{children}</div>;
 }
 
 function PrimaryButton({
@@ -1388,7 +2134,7 @@ function PrimaryButton({
 }) {
   return (
     <button className="primary-btn" disabled={disabled} onClick={onClick} type={type}>
-      {icon ? <span>{icon}</span> : null}
+      {icon ? <span className="btn-icon">{icon}</span> : null}
       {children}
     </button>
   );
@@ -1397,19 +2143,16 @@ function PrimaryButton({
 function OutlineButton({
   children,
   disabled,
-  icon,
   onClick,
   type = "button",
 }: {
   children: React.ReactNode;
   disabled?: boolean;
-  icon?: React.ReactNode;
   onClick?: () => void;
   type?: "button" | "submit";
 }) {
   return (
     <button className="outline-btn" disabled={disabled} onClick={onClick} type={type}>
-      {icon ? <span>{icon}</span> : null}
       {children}
     </button>
   );
@@ -1426,283 +2169,181 @@ function Field({
   icon?: React.ReactNode;
 }) {
   return (
-    <label className="field" style={{ marginBottom: "14px" }}>
-      <span style={{ display: "block", marginBottom: "6px" }}>{label}</span>
-      <div className={["input-wrap", leadingAddon ? "with-prefix" : ""].join(" ")} style={{ position: "relative" }}>
-        {leadingAddon ? <div className="input-prefix">{leadingAddon}</div> : null}
-        {icon && !leadingAddon ? (
-          <span
-            style={{
-              position: "absolute",
-              left: "12px",
-              top: "50%",
-              transform: "translateY(-50%)",
-              display: "flex",
-              alignItems: "center",
-              color: "rgba(255,255,255,0.4)",
-              pointerEvents: "none",
-            }}
-          >
-            {icon}
-          </span>
-        ) : null}
-        <input {...props} style={icon && !leadingAddon ? { paddingLeft: "38px" } : undefined} />
-      </div>
+    <label className="field">
+      <span className="field-label">{label}</span>
+      <span className={["input-wrap", leadingAddon ? "with-prefix" : "", icon && !leadingAddon ? "with-icon" : ""].join(" ")}>
+        {leadingAddon ? <span className="input-prefix">{leadingAddon}</span> : null}
+        {icon && !leadingAddon ? <span className="input-icon">{icon}</span> : null}
+        <input {...props} />
+      </span>
     </label>
   );
 }
 
-function TextAreaField({
-  label,
-  ...props
-}: React.TextareaHTMLAttributes<HTMLTextAreaElement> & {
-  label: string;
-}) {
+function TextAreaField({ label, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { label: string }) {
   return (
     <label className="field">
-      <span>{label}</span>
-      <div className="input-wrap">
+      <span className="field-label">{label}</span>
+      <span className="input-wrap">
         <textarea {...props} />
-      </div>
+      </span>
     </label>
-  );
-}
-
-function SkyIcon({ size = 22, animated = true }: { size?: number; animated?: boolean }) {
-  // Aspect ratio from the source art (157x165) so the icon never distorts
-  // at different sizes.
-  const width = size * (157 / 165);
-
-  // Plain React state driving the morph instead of a CSS @keyframes
-  // animation -- simpler to reason about and verify, no dependency on
-  // styled-jsx's build-time class scoping working correctly with SVG
-  // children. A setInterval flips a boolean; each path's opacity responds
-  // via a CSS transition, so the fade itself is still smooth.
-  const [smiling, setSmiling] = useState(false);
-  useEffect(() => {
-    if (!animated) return;
-    const interval = setInterval(() => setSmiling((prev) => !prev), 1500);
-    return () => clearInterval(interval);
-  }, [animated]);
-
-  return (
-    <span style={{ position: "relative", display: "inline-block", width, height: size, verticalAlign: "middle" }}>
-      <img
-        src="/brand/sky-head-base.png"
-        alt="Sky"
-        style={{ width: "100%", height: "100%", display: "block" }}
-      />
-      {/* Position/size corrected: left=24.8%, width=58% match the mouth's
-          ACTUAL measured pixel position in the source art exactly (that
-          part was always right). The previous version shifted "left" to
-          make room for a taller box for the smile dip, WITHOUT adjusting
-          width to compensate -- that mismatch is what pushed the line
-          past the face's edge on one side. This version only adjusts
-          top/height (centered on the original line's vertical center),
-          leaving the correct horizontal values untouched. */}
-      <svg
-        viewBox="0 0 100 30"
-        preserveAspectRatio="none"
-        style={{
-          position: "absolute",
-          top: "39.3%",
-          left: "24.8%",
-          width: "58%",
-          height: "14%",
-        }}
-      >
-        <path
-          d="M 28,15 L 72,15"
-          stroke="#f5f7fb"
-          strokeWidth="6"
-          strokeLinecap="round"
-          fill="none"
-          style={animated ? { opacity: smiling ? 0 : 1, transition: "opacity 0.6s ease-in-out" } : { opacity: 1 }}
-        />
-        <path
-          d="M 28,10 Q 50,27 72,10"
-          stroke="#f5f7fb"
-          strokeWidth="6"
-          strokeLinecap="round"
-          fill="none"
-          style={animated ? { opacity: smiling ? 1 : 0, transition: "opacity 0.6s ease-in-out" } : { opacity: 0 }}
-        />
-      </svg>
-    </span>
-  );
-}
-
-function PageVoiceButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      className="page-voice-btn"
-      onClick={onClick}
-      type="button"
-      style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 18px" }}
-    >
-      <SkyIcon size={48} />
-      <span>Use Voice Assistance</span>
-    </button>
-  );
-}
-
-function CountryCodeSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  return (
-    <div className="country-code-picker">
-      <select
-        aria-label="Country code"
-        className="country-code-select"
-        onChange={(event) => onChange(event.target.value)}
-        value={value}
-      >
-        {countryCodeOptions.map(([code, label]) => (
-          <option key={code} value={code}>{code} {label}</option>
-        ))}
-      </select>
-      <span aria-hidden="true">{value}</span>
-    </div>
   );
 }
 
 function StatusBanner({ message, tone }: { message: string; tone: "error" | "success" }) {
-  return <div className={`status-banner ${tone}`}>{tone === "success" ? <Check /> : null}{message}</div>;
-}
-
-function FaceOrb({ label }: { label: string }) {
   return (
-    <div className="face-area">
-      <div className="scan-ring">
-        <div className="scan-core"><Sparkles /></div>
-      </div>
-      <div className="scan-line" />
-      <p>{label}</p>
+    <div className={`status-banner ${tone}`} role={tone === "error" ? "alert" : "status"}>
+      {tone === "success" ? <Check /> : null}
+      {message}
     </div>
   );
 }
 
-function LiveFaceOrb({
-  videoRef,
-  label,
-  scanState,
-}: {
-  videoRef: React.RefObject<HTMLVideoElement>;
-  label: string;
-  scanState: "idle" | "scanning" | "recognized" | "unknown";
-}) {
+
+function CountryCodeSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   return (
-    <div className="face-area">
-      <div className={`camera-ring ${scanState === "recognized" ? "recognized" : scanState === "unknown" ? "unknown" : ""}`}>
-        <div className="camera-video-wrap">
-          <video autoPlay className="camera-video" muted playsInline ref={videoRef} />
-          {scanState === "scanning" ? <div className="camera-scanline" /> : null}
-        </div>
-      </div>
-      <p>{label}</p>
-    </div>
+    <KioskSelect
+      onChange={onChange}
+      options={countryCodeOptions.map(([code, label]) => ({ value: code, label: `${code}  ${label}` }))}
+      value={value}
+      variant="compact"
+    />
   );
 }
 
-function VoiceOrb() {
-  return (
-    <div className="voice-orb">
-      <div><SkyIcon size={40} /></div>
-    </div>
-  );
+// Start times can be set to any SLOT_STEP_MINUTES minute, from opening time
+// up to the latest allowed start. A time is only reachable in the picker if
+// it hasn't passed yet and at least one duration still fits before closing
+// -- so visitors can only pick times the booking will actually accept.
+// BOOKING_DAYS_AHEAD = how far ahead the date picker goes (day/month/year).
+const SLOT_STEP_MINUTES = 5;
+const BOOKING_DAYS_AHEAD = 365;
+
+function toMinutes(hhmm: string) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+function fromMinutes(total: number) {
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function formatSlot(hhmm: string) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+}
+
+function timeSlotsFor(date: string): KioskOption[] {
+  if (!date) return [];
+  const slots: KioskOption[] = [];
+  for (let t = toMinutes(OPERATING_HOURS_START); t <= toMinutes(LATEST_BOOKING_START); t += SLOT_STEP_MINUTES) {
+    const time = fromMinutes(t);
+    if (isPastDateTime(date, time)) continue;
+    if (bookingDurationOptions(time).length === 0) continue;
+    slots.push({ value: time, label: formatSlot(time) });
+  }
+  return slots;
+}
+
+function bookingDates(): string[] {
+  const [y, m, d] = toDateInputValue().split("-").map(Number);
+  const dates: string[] = [];
+  for (let i = 0; i < BOOKING_DAYS_AHEAD; i += 1) {
+    const value = new Date(Date.UTC(y, m - 1, d + i)).toISOString().slice(0, 10);
+    // Only today can run out of times (after hours); future days share the
+    // same opening hours, so they're always bookable.
+    if (i === 0 && timeSlotsFor(value).length === 0) continue;
+    dates.push(value);
+  }
+  return dates;
 }
 
 function BookingFormPanel({
   bookingForm,
   busy,
-  onBack,
   onChange,
   onSubmit,
   service,
 }: {
   bookingForm: BookingForm;
   busy: boolean;
-  onBack: () => void;
   onChange: (value: BookingForm) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   service: ServiceType;
 }) {
-  const minDate = toDateInputValue();
-  const currentTime = toTimeInputValue();
-  const minTime = bookingForm.date === minDate && currentTime > OPERATING_HOURS_START
-    ? currentTime
-    : OPERATING_HOURS_START;
+  const validDates = useMemo(() => bookingDates(), []);
+  useEffect(() => preloadRoomPhotos(), []);
+
+  const photo =
+    service === "meeting_room"
+      ? { src: ROOM_PHOTOS[bookingForm.zoneId] ?? ROOM_PHOTOS.MR_1, label: bookingForm.zoneId === "MR_2" ? "Meeting Room 2" : "Meeting Room 1" }
+      : service === "podcast_studio"
+        ? { src: ROOM_PHOTOS.podcast_studio, label: "Podcast Studio" }
+        : { src: ROOM_PHOTOS.tiktok_studio, label: "TikTok Studio" };
+  const photoDescription = service === "meeting_room" ? null : roomDescription(service);
+  const photoFacts = service === "meeting_room" ? ROOM_FACTS[bookingForm.zoneId] : ROOM_FACTS[service];
+  const validTimes = useMemo(() => timeSlotsFor(bookingForm.date).map((slot) => slot.value), [bookingForm.date]);
   const durationOptions = bookingDurationOptions(bookingForm.time);
+
+  // If the stored date can't be booked any more (e.g. it's after hours
+  // today), start on the first day that still has free times.
+  useEffect(() => {
+    if (validDates.length > 0 && !validDates.includes(bookingForm.date)) {
+      onChange({ ...bookingForm, date: validDates[0], time: "", duration: "" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [validDates]);
+
+  function changeDate(date: string) {
+    const stillValid = timeSlotsFor(date).some((option) => option.value === bookingForm.time);
+    onChange({ ...bookingForm, date, time: stillValid ? bookingForm.time : "", duration: stillValid ? bookingForm.duration : "" });
+  }
+
+  function changeTime(time: string) {
+    const fits = bookingDurationOptions(time).some((option) => option.value === bookingForm.duration);
+    onChange({ ...bookingForm, time, duration: fits ? bookingForm.duration : "" });
+  }
 
   return (
     <form className="stack" onSubmit={onSubmit}>
-      <Panel>
-        {service === "meeting_room" ? (
-          <label className="field">
-            <span>Room Type / Room Name</span>
-            <select
-              className="select-field"
-              onChange={(event) => onChange({ ...bookingForm, zoneId: event.target.value })}
-              value={bookingForm.zoneId}
-            >
-              <option value="MR_1">Meeting Room 1</option>
-              <option value="MR_2">Meeting Room 2</option>
-            </select>
-          </label>
-        ) : null}
-        <Field
-          label="Date"
-          min={minDate}
-          onChange={(event) => {
-            const nextDate = event.target.value;
-            onChange({
-              ...bookingForm,
-              date: nextDate,
-              time: nextDate === minDate && bookingForm.time && bookingForm.time < (minTime || "")
-                ? ""
-                : bookingForm.time,
-            });
-          }}
-          required
-          type="date"
-          value={bookingForm.date}
+      {/* The room photo; for meeting rooms the room choice sits on it. */}
+      <RoomPhoto
+        description={photoDescription}
+        facts={photoFacts}
+        label={photo.label}
+        onChange={service === "meeting_room" ? (zoneId) => onChange({ ...bookingForm, zoneId }) : undefined}
+        options={
+          service === "meeting_room"
+            ? [
+                { value: "MR_1", label: "Meeting Room 1" },
+                { value: "MR_2", label: "Meeting Room 2" },
+              ]
+            : undefined
+        }
+        src={photo.src}
+        value={bookingForm.zoneId}
+      />
+      <Panel compact>
+        <DatePicker onChange={changeDate} validDates={validDates} value={bookingForm.date} />
+        <TimePicker disabled={!bookingForm.date} onChange={changeTime} validTimes={validTimes} value={bookingForm.time} />
+        <KioskSelect
+          disabled={!bookingForm.time}
+          label="Duration"
+          placement="up"
+          onChange={(duration) => onChange({ ...bookingForm, duration })}
+          options={durationOptions}
+          placeholder={bookingForm.time ? "Select a duration" : "Select a time first"}
+          value={bookingForm.duration}
         />
-        <Field
-          label="Time"
-          min={minTime}
-          max={LATEST_BOOKING_START}
-          onChange={(event) => {
-            const nextTime = event.target.value;
-            const nextDurationOptions = bookingDurationOptions(nextTime);
-            onChange({
-              ...bookingForm,
-              time: nextTime,
-              duration: nextDurationOptions.some((option) => option.value === bookingForm.duration)
-                ? bookingForm.duration
-                : "",
-            });
-          }}
-          required
-          type="time"
-          value={bookingForm.time}
-        />
-        <label className="field">
-          <span>Session Duration</span>
-          <select
-            className="select-field"
-            onChange={(event) => onChange({ ...bookingForm, duration: event.target.value })}
-            required
-            value={bookingForm.duration}
-          >
-            <option value="">
-              {bookingForm.time && durationOptions.length === 0 ? "Choose a 9 AM - 5 PM time" : "Select duration"}
-            </option>
-            {durationOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
       </Panel>
-      <PrimaryButton disabled={busy} type="submit"><KeyRound /> Submit Request</PrimaryButton>
-      <OutlineButton onClick={onBack} type="button">Back</OutlineButton>
+      <PrimaryButton
+        disabled={busy || !bookingForm.date || !bookingForm.time || !bookingForm.duration}
+        icon={<KeyRound />}
+        type="submit"
+      >
+        Reserve slot
+      </PrimaryButton>
     </form>
   );
 }

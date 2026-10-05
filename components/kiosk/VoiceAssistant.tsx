@@ -15,15 +15,21 @@ const MIN_REAL_SPEECH_MS = 400;
 
 const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
-// Known room -> (service_type, zone_id) mapping, matching
-// kiosk_flow_services.py's SERVICE_DEFAULTS. Update here if your actual
-// zone ids differ.
+// Known room -> (service_type, zone_id) mapping, matching the zones table and
+// kiosk_flow_services.py. TikTok has five rooms; every room except the two
+// meeting rooms is booked through Spacebring (system of record) by the backend.
 const ROOM_MAP: Record<string, { service_type: string; zone_id: string }> = {
   meeting_room_1: { service_type: "meeting_room", zone_id: "MR_1" },
   meeting_room_2: { service_type: "meeting_room", zone_id: "MR_2" },
   podcast_studio: { service_type: "podcast_studio", zone_id: "POD_1" },
   tiktok_studio: { service_type: "tiktok_studio", zone_id: "TTS_1" },
+  tiktok_beauty_room: { service_type: "tiktok_studio", zone_id: "TTS_2" },
+  tiktok_music_room: { service_type: "tiktok_studio", zone_id: "TTS_3" },
+  tiktok_battle_room_1: { service_type: "tiktok_studio", zone_id: "TTS_4" },
+  tiktok_battle_room_2: { service_type: "tiktok_studio", zone_id: "TTS_5" },
 };
+
+const ROOM_KEYS = Object.keys(ROOM_MAP) as [string, ...string[]];
 
 // Next.js serves files under public/ at the root path WITHOUT a /public
 // prefix (unlike the original Vite tester's paths) -- these point at
@@ -32,8 +38,22 @@ const ROOM_DISPLAY_INFO: Record<string, { label: string; imageUrl: string }> = {
   meeting_room_1: { label: "Meeting Room 1", imageUrl: "/images/meeting_room_1.PNG" },
   meeting_room_2: { label: "Meeting Room 2", imageUrl: "/images/meeting_room_2.PNG" },
   podcast_studio: { label: "Podcast Studio", imageUrl: "/images/podcast_studio.PNG" },
-  tiktok_studio: { label: "TikTok Studio", imageUrl: "/images/tiktok_studio.PNG" },
+  tiktok_studio: { label: "TikTok Main Studio", imageUrl: "/images/tiktok_studio.PNG" },
+  // No dedicated photos yet for the other TikTok rooms - reuse the studio photo.
+  tiktok_beauty_room: { label: "TikTok Beauty Room", imageUrl: "/images/tiktok_studio.PNG" },
+  tiktok_music_room: { label: "TikTok Music Room", imageUrl: "/images/tiktok_studio.PNG" },
+  tiktok_battle_room_1: { label: "TikTok Battle Room 1", imageUrl: "/images/tiktok_studio.PNG" },
+  tiktok_battle_room_2: { label: "TikTok Battle Room 2", imageUrl: "/images/tiktok_studio.PNG" },
 };
+
+/** Spoken-friendly reason for a failed booking-system call. */
+function bookingFailureMessage(status: number, body: { message?: string } | null): string {
+  if (status === 409) return "That time is already taken - offer the visitor a different time or room.";
+  if (status === 502) {
+    return "The booking system is temporarily unavailable. Apologise briefly and suggest asking reception.";
+  }
+  return body?.message || "That didn't work - tell the visitor and offer to try a different time.";
+}
 
 type VoiceVisitor = {
   visitor_id: number;
@@ -352,8 +372,7 @@ export function VoiceAssistant({
         "duration. Call it again if they change their mind about which room. Purely visual, doesn't " +
         "affect the booking itself.",
       parameters: z.object({
-        room: z.enum(["meeting_room_1", "meeting_room_2", "podcast_studio", "tiktok_studio"])
-          .describe("Which room/service to show a picture of"),
+        room: z.enum(ROOM_KEYS).describe("Which room/service to show a picture of"),
       }),
       async execute({ room }: { room: string }) {
         appendToolLog(`preview_room(${room})`);
@@ -371,8 +390,7 @@ export function VoiceAssistant({
         "this once you know which room/service, the date, the time, and the duration, and the visitor " +
         "is already signed in (via lookup_visitor or register_visitor).",
       parameters: z.object({
-        room: z.enum(["meeting_room_1", "meeting_room_2", "podcast_studio", "tiktok_studio"])
-          .describe("Which room or service to book"),
+        room: z.enum(ROOM_KEYS).describe("Which room or service to book"),
         date: z.string().describe("The date, in YYYY-MM-DD format"),
         time: z.string().describe("The start time, 24-hour format, e.g. '14:00'"),
         duration_minutes: z.number().describe("How long the booking is for, in minutes"),
@@ -414,12 +432,144 @@ export function VoiceAssistant({
           appendToolLog(`booking failed (status ${res.status})`);
           return JSON.stringify({
             booked: false,
-            message: body?.message || "That didn't work - please tell the visitor and offer to try a different time.",
+            message: bookingFailureMessage(res.status, body),
             details: body?.details,
           });
         } catch (err) {
           appendToolLog(`error: ${err}`);
           return JSON.stringify({ booked: false, error: String(err) });
+        }
+      },
+    });
+
+    const checkAvailabilityTool = tool({
+      name: "check_availability",
+      description:
+        "Check whether a room is free for a date, time and duration, BEFORE offering or booking it. " +
+        "Use it whenever the visitor asks 'is it free?', and call it once you have the room, date, " +
+        "time and duration, ahead of create_booking. Read-only; never books anything.",
+      parameters: z.object({
+        room: z.enum(ROOM_KEYS).describe("Which room or service to check"),
+        date: z.string().describe("The date, in YYYY-MM-DD format"),
+        time: z.string().describe("The start time, 24-hour format, e.g. '14:00'"),
+        duration_minutes: z.number().describe("How long, in minutes"),
+      }),
+      async execute({ room, date, time, duration_minutes }: {
+        room: string; date: string; time: string; duration_minutes: number;
+      }) {
+        const mapping = ROOM_MAP[room];
+        appendToolLog(`check_availability(${room}, ${date} ${time}, ${duration_minutes}min)`);
+        try {
+          const query = new URLSearchParams({
+            zone_id: mapping.zone_id,
+            booking_date: date,
+            booking_time_start: time,
+            duration_minutes: String(duration_minutes),
+          });
+          const res = await fetch(`${BACKEND_BASE_URL}/api/kiosk/availability?${query}`);
+          const body = await res.json().catch(() => ({}));
+          if (res.ok && body?.data) {
+            appendToolLog(`availability: ${body.data.available ? "free" : "taken"}`);
+            return JSON.stringify({ available: body.data.available, room: body.data.room_name });
+          }
+          return JSON.stringify({ available: null, message: bookingFailureMessage(res.status, body) });
+        } catch (err) {
+          appendToolLog(`error: ${err}`);
+          return JSON.stringify({ available: null, error: String(err) });
+        }
+      },
+    });
+
+    const listMyBookingsTool = tool({
+      name: "list_my_bookings",
+      description:
+        "List the signed-in visitor's current and upcoming bookings (each has a booking_id). Call this " +
+        "before cancelling or rescheduling, or when they ask what they have booked.",
+      parameters: z.object({}),
+      async execute() {
+        const visitor = currentVisitorRef.current;
+        if (!visitor) {
+          return JSON.stringify({ message: "No visitor is signed in yet." });
+        }
+        appendToolLog("list_my_bookings()");
+        try {
+          const res = await fetch(`${BACKEND_BASE_URL}/api/kiosk/current-bookings?visitor_id=${visitor.visitor_id}`);
+          if (res.status === 404) return JSON.stringify({ bookings: [] });
+          const body = await res.json().catch(() => ({}));
+          if (res.ok && Array.isArray(body?.data)) {
+            appendToolLog(`${body.data.length} booking(s)`);
+            return JSON.stringify({ bookings: body.data });
+          }
+          return JSON.stringify({ message: bookingFailureMessage(res.status, body) });
+        } catch (err) {
+          appendToolLog(`error: ${err}`);
+          return JSON.stringify({ error: String(err) });
+        }
+      },
+    });
+
+    const rescheduleBookingTool = tool({
+      name: "reschedule_booking",
+      description:
+        "Move one of the signed-in visitor's existing bookings to a new date and/or start time (and " +
+        "optionally a new duration). Get the booking_id from list_my_bookings, and check_availability " +
+        "for the new slot first. Send only the fields that change.",
+      parameters: z.object({
+        booking_id: z.number().describe("The booking_id from list_my_bookings"),
+        date: z.string().nullable().optional().describe("New date, YYYY-MM-DD, if it changes"),
+        time: z.string().nullable().optional().describe("New start time, 24-hour, if it changes"),
+        duration_minutes: z.number().nullable().optional().describe("New duration in minutes, if it changes"),
+      }),
+      needsApproval: true,
+      async execute({ booking_id, date, time, duration_minutes }: {
+        booking_id: number; date?: string | null; time?: string | null; duration_minutes?: number | null;
+      }) {
+        appendToolLog(`reschedule_booking(${booking_id}, ${date ?? "-"} ${time ?? "-"}, ${duration_minutes ?? "-"}min)`);
+        try {
+          const res = await fetch(`${BACKEND_BASE_URL}/api/kiosk/bookings/${booking_id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ...(date ? { booking_date: date } : {}),
+              ...(time ? { booking_time_start: time } : {}),
+              ...(duration_minutes ? { duration_minutes } : {}),
+            }),
+          });
+          const body = await res.json().catch(() => ({}));
+          if (res.ok && body?.data) {
+            appendToolLog(`moved: ${body.data.room_name} ${body.data.booking_date} ${body.data.booking_time_start}`);
+            return JSON.stringify({ rescheduled: true, booking: body.data });
+          }
+          return JSON.stringify({ rescheduled: false, message: bookingFailureMessage(res.status, body) });
+        } catch (err) {
+          appendToolLog(`error: ${err}`);
+          return JSON.stringify({ rescheduled: false, error: String(err) });
+        }
+      },
+    });
+
+    const cancelBookingTool = tool({
+      name: "cancel_booking",
+      description:
+        "Cancel one of the signed-in visitor's bookings. Get the booking_id from list_my_bookings and " +
+        "read the booking back to the visitor before cancelling.",
+      parameters: z.object({
+        booking_id: z.number().describe("The booking_id from list_my_bookings"),
+      }),
+      needsApproval: true,
+      async execute({ booking_id }: { booking_id: number }) {
+        appendToolLog(`cancel_booking(${booking_id})`);
+        try {
+          const res = await fetch(`${BACKEND_BASE_URL}/api/kiosk/bookings/${booking_id}`, { method: "DELETE" });
+          const body = await res.json().catch(() => ({}));
+          if (res.ok) {
+            appendToolLog("cancelled");
+            return JSON.stringify({ cancelled: true });
+          }
+          return JSON.stringify({ cancelled: false, message: bookingFailureMessage(res.status, body) });
+        } catch (err) {
+          appendToolLog(`error: ${err}`);
+          return JSON.stringify({ cancelled: false, error: String(err) });
         }
       },
     });
@@ -470,6 +620,10 @@ export function VoiceAssistant({
       registerVisitorTool,
       captureRegistrationFieldTool,
       createBookingTool,
+      checkAvailabilityTool,
+      listMyBookingsTool,
+      rescheduleBookingTool,
+      cancelBookingTool,
       previewRoomTool,
       endConversationTool,
     ];
@@ -483,8 +637,8 @@ export function VoiceAssistant({
     const greetingSection = knownVisitor
       ? `**Greeting.** ${knownVisitor.visitor_name} is ALREADY signed in (${knownVisitor.visitor_type === "client" ? "existing customer" : "new visitor"}) - do NOT ask for their name, email, phone, or customer status, you already have all of it. Just greet them warmly by name and ask how you can help.`
       : `**Greeting.** Greet the visitor warmly, briefly mention what you can help with (logging in or
-registering, answering questions about Innovation City, and booking a meeting room, podcast
-studio, or TikTok studio), and ask ONLY whether they're an existing customer or new here - nothing
+registering, answering questions about Innovation City, and booking, moving or cancelling a meeting room, podcast
+studio, or TikTok room), and ask ONLY whether they're an existing customer or new here - nothing
 else yet. What you ask next depends entirely on their answer (see below).`;
 
     const signInSection = knownVisitor
@@ -517,16 +671,29 @@ ${greetingSection}
 question right away using the knowledge base below - never defer it. Then pick back up exactly
 where you left off.
 ${signInSection}
-**Booking a room or service.** Once signed in, book via create_booking. You need:
-- Which room/service - if "a meeting room" without specifying, ask which (there are two:
-  meeting_room_1/meeting_room_2). Podcast/TikTok studio: only one each, don't ask which.
+**Booking a room or service.** Once signed in, you can book, check, move or cancel rooms. Bookings
+live in the Innovation City booking system, so always trust its answers - never guess whether a
+room is free.
+- Which room/service. Rooms: meeting_room_1, meeting_room_2, podcast_studio, and five TikTok rooms:
+  tiktok_studio (the Main Studio), tiktok_beauty_room, tiktok_music_room, tiktok_battle_room_1,
+  tiktok_battle_room_2. If they say "a meeting room" or "a TikTok room" without saying which, ask
+  which. Podcast: only one, don't ask.
 - Date, time, and duration in minutes.
 
 The moment the room/service choice is settled - even before you've collected date, time, or
 duration - call preview_room with it so the visitor sees a picture of it.
 
-Gather whatever's missing across turns - don't demand everything at once. Call create_booking once
-you have all four. Must be signed in first.
+Gather whatever's missing across turns - don't demand everything at once. Once you have room, date,
+time and duration, call check_availability. If it's free, call create_booking. If it's taken, say
+so in one short sentence and offer another time or room (check that too before offering it).
+
+To see what they have booked, call list_my_bookings. To move a booking, call list_my_bookings, agree
+the new time, call check_availability for it, then reschedule_booking. To cancel, call
+list_my_bookings, read the booking back, then cancel_booking. Moving and cancelling ask the visitor
+to confirm on screen, so don't promise it's done until the tool says so.
+
+If a booking tool says the booking system is unavailable, apologise briefly and suggest reception.
+Must be signed in first.
 
 **Knowledge base - use this, and only this, for general questions.** If not covered here, say
 you're not sure and suggest reception:

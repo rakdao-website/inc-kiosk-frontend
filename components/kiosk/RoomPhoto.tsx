@@ -26,6 +26,7 @@ export const ROOM_PHOTOS: Record<string, string> = {
 
 /** Every location a photo might be in: both folders, both extension cases. */
 export function photoCandidates(src: string): string[] {
+  if (/^https?:\/\//i.test(src)) return [src]; // a remote photo (Spacebring): no local fallbacks
   const file = src.split("/").pop() ?? src;
   const base = file.replace(/\.png$/i, "");
   const out: string[] = [];

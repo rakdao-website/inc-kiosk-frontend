@@ -199,6 +199,34 @@ const FACE_CAPTURE_WIDTH = 360;
 const FACE_CAPTURE_HEIGHT = 270;
 const FACE_CAPTURE_QUALITY = 0.76;
 
+/** A bookable room from the backend (GET /api/kiosk/rooms). */
+type KioskRoom = {
+  zone_id: string;
+  room_name: string;
+  service_type: ServiceType;
+  is_closed: boolean;
+  source: "spacebring" | "internal";
+  image_url: string | null;
+};
+
+// Used only if the rooms request fails, so the kiosk still works offline from the list.
+const FALLBACK_ROOMS: KioskRoom[] = [
+  { zone_id: "MR_1", room_name: "Meeting Room 1", service_type: "meeting_room", is_closed: false, source: "internal", image_url: null },
+  { zone_id: "MR_2", room_name: "Meeting Room 2", service_type: "meeting_room", is_closed: false, source: "internal", image_url: null },
+  { zone_id: "POD_1", room_name: "Podcast Studio", service_type: "podcast_studio", is_closed: false, source: "spacebring", image_url: null },
+  { zone_id: "TTS_1", room_name: "TikTok Studio", service_type: "tiktok_studio", is_closed: false, source: "spacebring", image_url: null },
+];
+
+function roomsForService(rooms: KioskRoom[], service: ServiceType): KioskRoom[] {
+  const list = rooms.filter((room) => room.service_type === service && !room.is_closed);
+  return list.length > 0 ? list : FALLBACK_ROOMS.filter((room) => room.service_type === service);
+}
+
+/** Photo for a room: its Spacebring cover photo, else our bundled photo. */
+function roomPhotoSrc(room: KioskRoom | undefined, service: ServiceType, zoneId: string): string {
+  return room?.image_url ?? ROOM_PHOTOS[zoneId] ?? ROOM_PHOTOS[service] ?? ROOM_PHOTOS.MR_1;
+}
+
 const initialBookingForm: BookingForm = {
   zoneId: "MR_1",
   date: todayIso(),
@@ -293,6 +321,8 @@ export default function KioskPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [captureId, setCaptureId] = useState<number | null>(null);
+  // Which "is this you?" card the guest tapped; reviewers see it in the admin approval queue.
+  const [chosenRank, setChosenRank] = useState<number | null>(null);
   const [facecheckSuggestions, setFacecheckSuggestions] = useState<FaceCheckSuggestion[] | null>(null);
   const [scanState, setScanState] = useState<"idle" | "scanning" | "recognized" | "unknown">("idle");
   const autoScanTriggeredRef = useRef(false);
@@ -315,6 +345,7 @@ export default function KioskPage() {
   const [visitSession, setVisitSession] = useState<VisitSession | null>(null);
   const [currentBookings, setCurrentBookings] = useState<CurrentBooking[]>([]);
   const [selectedService, setSelectedService] = useState<ServiceType>("meeting_room");
+  const [rooms, setRooms] = useState<KioskRoom[]>([]);
   const [consentChecked, setConsentChecked] = useState(true);
   const [events, setEvents] = useState<KioskEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<KioskEvent | null>(null);
@@ -339,6 +370,13 @@ export default function KioskPage() {
     email: "",
     visitor_type: "visitor" as "client" | "visitor",
   });
+
+  // Rooms come from the backend, so new, renamed or closed rooms show up without a code change.
+  useEffect(() => {
+    requestJson<KioskRoom[]>("/api/kiosk/rooms")
+      .then(setRooms)
+      .catch(() => setRooms([]));
+  }, []);
 
   useEffect(() => {
     if (step !== "start") {
@@ -500,7 +538,8 @@ export default function KioskPage() {
     }
   }
 
-  function handleFaceCheckRespond() {
+  function handleFaceCheckRespond(rank?: number) {
+    setChosenRank(typeof rank === "number" ? rank : null);
     // Whether the visitor picked one of the FaceCheckID suggestions or said
     // "none of these", the next step is the same: collect their details and
     // link that capture to a (new or found) visitor. The chosen suggestion
@@ -668,13 +707,14 @@ export default function KioskPage() {
   async function createVisitorFromForm(): Promise<{ visitor: Visitor; linkedFace: boolean }> {
     const mobileNumber = `${registration.country_code}${normalizeLocalMobileNumber(registration.mobile_number)}`;
     if (captureId) {
-      const linkResult = await requestJson<LinkCaptureResult>(`/api/face/captures/${captureId}/link`, {
+      const linkResult = await requestJson<LinkCaptureResult>(`/api/kiosk/captures/${captureId}/link`, {
         method: "POST",
         body: JSON.stringify({
           full_name: registration.full_name,
           mobile_number: mobileNumber,
           email: registration.email,
           visitor_type: registration.visitor_type,
+          chosen_rank: chosenRank,
           enroll_face: true,
         }),
       });
@@ -753,7 +793,7 @@ export default function KioskPage() {
         // enrolls it as this visitor's face profile in one step -- no need
         // for a second face-scan/consent step.
         const linkResult = await requestJson<LinkCaptureResult>(
-          `/api/face/captures/${captureId}/link`,
+          `/api/kiosk/captures/${captureId}/link`,
           {
             method: "POST",
             body: JSON.stringify({
@@ -761,6 +801,7 @@ export default function KioskPage() {
               mobile_number: mobileNumber,
               email: registration.email,
               visitor_type: registration.visitor_type,
+              chosen_rank: chosenRank,
               enroll_face: true,
             }),
           },
@@ -953,18 +994,16 @@ export default function KioskPage() {
     setError(null);
 
     if (isBookableService(service)) {
+      const choices = roomsForService(rooms, service);
+      const stillValid = choices.some((room) => room.zone_id === bookingForm.zoneId);
       setBookingForm((value) => ({
         ...value,
-        zoneId:
-          service === "meeting_room"
-            ? value.zoneId || "MR_1"
-            : service === "podcast_studio"
-              ? "POD_1"
-              : "TTS_1",
+        zoneId: stillValid ? value.zoneId : choices[0]?.zone_id ?? value.zoneId,
       }));
-      if (service === "meeting_room") setStep("room-select"); // pick the room by photo first
-      if (service === "podcast_studio") setStep("booking-podcast");
-      if (service === "tiktok_studio") setStep("booking-tiktok");
+      // More than one room to choose from: pick the room by photo first.
+      if (service === "meeting_room" || (service === "tiktok_studio" && choices.length > 1)) setStep("room-select");
+      else if (service === "podcast_studio") setStep("booking-podcast");
+      else setStep("booking-tiktok");
       return;
     }
 
@@ -1253,7 +1292,7 @@ export default function KioskPage() {
                           className="glass-card match-card"
                           disabled={busy}
                           key={candidate.rank}
-                          onClick={handleFaceCheckRespond}
+                          onClick={() => handleFaceCheckRespond(candidate.rank)}
                           type="button"
                         >
                           <span className="match-head">
@@ -1504,21 +1543,21 @@ export default function KioskPage() {
           ) : null}
 
           {step === "room-select" ? (
-            <Screen onBack={() => setStep("service-selection")}>
+            <Screen scroll onBack={() => setStep("service-selection")}>
               <TitleBlock eyebrow="Booking">Choose your room</TitleBlock>
               <div className="room-choice-list">
-                {(["MR_1", "MR_2"] as const).map((zoneId) => (
+                {roomsForService(rooms, selectedService).map((room) => (
                   <RoomChoiceCard
-                    description={roomDescription(zoneId)}
-                    facts={ROOM_FACTS[zoneId]}
-                    key={zoneId}
-                    label={zoneId === "MR_1" ? "Meeting Room 1" : "Meeting Room 2"}
+                    description={roomDescription(selectedService === "meeting_room" ? room.zone_id : selectedService)}
+                    facts={ROOM_FACTS[room.zone_id] ?? ROOM_FACTS[selectedService]}
+                    key={room.zone_id}
+                    label={room.room_name}
                     onChoose={() => {
-                      setBookingForm((value) => ({ ...value, zoneId }));
-                      setStep("booking");
+                      setBookingForm((value) => ({ ...value, zoneId: room.zone_id }));
+                      setStep(selectedService === "tiktok_studio" ? "booking-tiktok" : "booking");
                     }}
-                    selected={bookingForm.zoneId === zoneId}
-                    src={ROOM_PHOTOS[zoneId]}
+                    selected={bookingForm.zoneId === room.zone_id}
+                    src={roomPhotoSrc(room, selectedService, room.zone_id)}
                   />
                 ))}
               </div>
@@ -1526,13 +1565,22 @@ export default function KioskPage() {
           ) : null}
 
           {step === "booking" || step === "booking-podcast" || step === "booking-tiktok" ? (
-            <Screen onBack={() => setStep(step === "booking" ? "room-select" : "service-selection")}>
+            <Screen
+              onBack={() =>
+                setStep(
+                  step === "booking" || (step === "booking-tiktok" && roomsForService(rooms, "tiktok_studio").length > 1)
+                    ? "room-select"
+                    : "service-selection",
+                )
+              }
+            >
               <TitleBlock eyebrow="Booking">{bookingTitle}</TitleBlock>
               <BookingFormPanel
                 bookingForm={bookingForm}
                 busy={busy}
                 onChange={setBookingForm}
                 onSubmit={handleBooking}
+                rooms={roomsForService(rooms, selectedService)}
                 service={selectedService}
               />
             </Screen>
@@ -2264,25 +2312,27 @@ function BookingFormPanel({
   busy,
   onChange,
   onSubmit,
+  rooms,
   service,
 }: {
   bookingForm: BookingForm;
   busy: boolean;
   onChange: (value: BookingForm) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  rooms: KioskRoom[];
   service: ServiceType;
 }) {
   const validDates = useMemo(() => bookingDates(), []);
   useEffect(() => preloadRoomPhotos(), []);
 
-  const photo =
-    service === "meeting_room"
-      ? { src: ROOM_PHOTOS[bookingForm.zoneId] ?? ROOM_PHOTOS.MR_1, label: bookingForm.zoneId === "MR_2" ? "Meeting Room 2" : "Meeting Room 1" }
-      : service === "podcast_studio"
-        ? { src: ROOM_PHOTOS.podcast_studio, label: "Podcast Studio" }
-        : { src: ROOM_PHOTOS.tiktok_studio, label: "TikTok Studio" };
+  const chosenRoom = rooms.find((room) => room.zone_id === bookingForm.zoneId) ?? rooms[0];
+  const photo = {
+    src: roomPhotoSrc(chosenRoom, service, chosenRoom?.zone_id ?? bookingForm.zoneId),
+    label: chosenRoom?.room_name ?? (service === "podcast_studio" ? "Podcast Studio" : service === "tiktok_studio" ? "TikTok Studio" : "Meeting Room"),
+  };
+  const hasRoomChoice = rooms.length > 1;
   const photoDescription = service === "meeting_room" ? null : roomDescription(service);
-  const photoFacts = service === "meeting_room" ? ROOM_FACTS[bookingForm.zoneId] : ROOM_FACTS[service];
+  const photoFacts = ROOM_FACTS[chosenRoom?.zone_id ?? bookingForm.zoneId] ?? ROOM_FACTS[service];
   const validTimes = useMemo(() => timeSlotsFor(bookingForm.date).map((slot) => slot.value), [bookingForm.date]);
   const durationOptions = bookingDurationOptions(bookingForm.time);
 
@@ -2312,15 +2362,8 @@ function BookingFormPanel({
         description={photoDescription}
         facts={photoFacts}
         label={photo.label}
-        onChange={service === "meeting_room" ? (zoneId) => onChange({ ...bookingForm, zoneId }) : undefined}
-        options={
-          service === "meeting_room"
-            ? [
-                { value: "MR_1", label: "Meeting Room 1" },
-                { value: "MR_2", label: "Meeting Room 2" },
-              ]
-            : undefined
-        }
+        onChange={hasRoomChoice ? (zoneId) => onChange({ ...bookingForm, zoneId }) : undefined}
+        options={hasRoomChoice ? rooms.map((room) => ({ value: room.zone_id, label: room.room_name })) : undefined}
         src={photo.src}
         value={bookingForm.zoneId}
       />

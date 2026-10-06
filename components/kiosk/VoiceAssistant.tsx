@@ -635,7 +635,7 @@ export function VoiceAssistant({
     const today = new Date().toISOString().slice(0, 10);
 
     const greetingSection = knownVisitor
-      ? `**Greeting.** ${knownVisitor.visitor_name} is ALREADY signed in (${knownVisitor.visitor_type === "client" ? "existing customer" : "new visitor"}) - do NOT ask for their name, email, phone, or customer status, you already have all of it. Just greet them warmly by name and ask how you can help.`
+      ? `**Greeting.** ${knownVisitor.visitor_name} is ALREADY signed in (${knownVisitor.visitor_type === "client" ? "existing customer" : knownVisitor.visitor_type === "employee" ? "Innovation City team member" : "new visitor"}) - do NOT ask for their name, email, phone, or customer status, you already have all of it. Just greet them warmly by name and ask how you can help.`
       : `**Greeting.** Greet the visitor warmly, briefly mention what you can help with (logging in or
 registering, answering questions about Innovation City, and booking, moving or cancelling a meeting room, podcast
 studio, or TikTok room), and ask ONLY whether they're an existing customer or new here - nothing

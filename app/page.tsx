@@ -60,7 +60,7 @@ type Visitor = {
   visitor_name: string;
   visitor_phone: string;
   visitor_email?: string | null;
-  visitor_type: "client" | "visitor";
+  visitor_type: "client" | "employee" | "visitor";
   company_name?: string | null;
   company_number?: string | null;
   face_consent_given: boolean;

@@ -195,6 +195,12 @@ const START_TEXT = {
 const FACE_LOGIN_SAMPLE_COUNT = 1;
 const FACE_LOGIN_RETRY_SAMPLE_COUNT = 2;
 const FACE_ENROLLMENT_SAMPLE_COUNT = 3;
+
+// Defaults for the face scan; reception can change them in the admin panel
+// (read from /api/kiosk/config when the screen loads).
+type ScanConfig = { durationMs: number; recognitionPhotos: number; enrolmentPhotos: number };
+const DEFAULT_SCAN_CONFIG: ScanConfig = { durationMs: KYC_SCAN_MS, recognitionPhotos: FACE_ENROLLMENT_SAMPLE_COUNT, enrolmentPhotos: FACE_ENROLLMENT_SAMPLE_COUNT };
+type KioskConfig = { face_scan: { duration_ms: number; recognition_photos: number; enrolment_photos: number } };
 const FACE_CAPTURE_WIDTH = 360;
 const FACE_CAPTURE_HEIGHT = 270;
 const FACE_CAPTURE_QUALITY = 0.76;
@@ -321,6 +327,7 @@ export default function KioskPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [captureId, setCaptureId] = useState<number | null>(null);
+  const [scanConfig, setScanConfig] = useState<ScanConfig>(DEFAULT_SCAN_CONFIG);
   // Which "is this you?" card the guest tapped; reviewers see it in the admin approval queue.
   const [chosenRank, setChosenRank] = useState<number | null>(null);
   const [facecheckSuggestions, setFacecheckSuggestions] = useState<FaceCheckSuggestion[] | null>(null);
@@ -372,6 +379,19 @@ export default function KioskPage() {
   });
 
   // Rooms come from the backend, so new, renamed or closed rooms show up without a code change.
+  // Face-scan settings from the admin panel. If the call fails the defaults above stay.
+  useEffect(() => {
+    requestJson<KioskConfig>("/api/kiosk/config")
+      .then((config) =>
+        setScanConfig({
+          durationMs: config.face_scan.duration_ms,
+          recognitionPhotos: config.face_scan.recognition_photos,
+          enrolmentPhotos: config.face_scan.enrolment_photos,
+        }),
+      )
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     requestJson<KioskRoom[]>("/api/kiosk/rooms")
       .then(setRooms)
@@ -493,7 +513,7 @@ export default function KioskPage() {
     setError(null);
     setScanState("scanning");
     try {
-      const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT, {
+      const images = await captureFaceSamples(scanConfig.enrolmentPhotos, {
         updateEnrollmentProgress: false,
         stream: scanner.stream,
       });
@@ -585,7 +605,7 @@ export default function KioskPage() {
     await wait(KYC_ALIGN_MS);
     if (kycCancelledRef.current) return;
     setKycPhase("scanning");
-    await wait(KYC_SCAN_MS);
+    await wait(scanConfig.durationMs);
     if (kycCancelledRef.current) return;
     await handleFaceScan({
       stream,
@@ -609,11 +629,11 @@ export default function KioskPage() {
     await wait(KYC_ALIGN_MS);
     if (kycCancelledRef.current) return;
     setKycPhase("scanning");
-    await wait(Math.max(0, KYC_SCAN_MS - 700)); // 3 photos take ~0.7s
+    await wait(Math.max(0, scanConfig.durationMs - 700)); // 3 photos take ~0.7s
     if (kycCancelledRef.current) return;
     setBusy(true);
     try {
-      const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT, { updateEnrollmentProgress: false, stream });
+      const images = await captureFaceSamples(scanConfig.enrolmentPhotos, { updateEnrollmentProgress: false, stream });
       if (kycCancelledRef.current) return;
       setKycPhase("checking");
       await requestJson<FaceProfileResult>("/api/kiosk/face-profile", {
@@ -873,7 +893,7 @@ export default function KioskPage() {
   }
 
   async function captureFaceSamples(
-    sampleCount = FACE_ENROLLMENT_SAMPLE_COUNT,
+    sampleCount = scanConfig.enrolmentPhotos,
     options: { updateEnrollmentProgress?: boolean; stream?: MediaStream } = {},
   ): Promise<string[]> {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -936,7 +956,7 @@ export default function KioskPage() {
   // visitor could be on any screen and the voice conversation should just
   // continue afterward, not redirect them anywhere.
   async function handleVoiceFaceEnrollment(voiceVisitor: { visitor_id: number; visitor_name: string; visitor_type: string }) {
-    const images = await captureFaceSamples(FACE_ENROLLMENT_SAMPLE_COUNT);
+    const images = await captureFaceSamples(scanConfig.recognitionPhotos);
     await requestJson<FaceProfileResult>("/api/kiosk/face-profile", {
       method: "POST",
       body: JSON.stringify({
@@ -1901,7 +1921,7 @@ export default function KioskPage() {
             onCancel={cancelKycScan}
             onStream={handleKycStream}
             phase={kycPhase}
-            scanMs={KYC_SCAN_MS}
+            scanMs={scanConfig.durationMs}
           />
         ) : null}
 

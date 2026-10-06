@@ -26,10 +26,10 @@ import { useEffect, useRef } from "react";
 /** Face width as a share of the frame that counts as "close". */
 const FACE_MIN_WIDTH = 0.18;
 /** Share of the centre region that must change between checks (motion fallback). */
-const MOTION_RATIO = 0.16;
+const MOTION_RATIO = 0.10;
 /** Consecutive positive checks needed (at 250ms each). */
 const FACE_HITS = 2;
-const MOTION_HITS = 3;
+const MOTION_HITS = 2;
 const CHECK_MS = 250;
 
 type Face = { boundingBox: DOMRectReadOnly };
@@ -129,7 +129,7 @@ export function usePresence(active: boolean, onPresent: () => void) {
             for (let y = 3; y < H - 3; y += 1) {
               for (let x = Math.floor(W / 6); x < W - Math.floor(W / 6); x += 1) {
                 total += 1;
-                if (Math.abs(luminance[y * W + x] - previous[y * W + x]) > 26) changed += 1;
+                if (Math.abs(luminance[y * W + x] - previous[y * W + x]) > 20) changed += 1;
               }
             }
             hits = changed / total >= MOTION_RATIO ? hits + 1 : 0;

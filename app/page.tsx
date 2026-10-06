@@ -87,6 +87,8 @@ type RecognitionResult = {
   confidence?: number | null;
   capture_id?: number | null;
   facecheck_suggestions?: FaceCheckSuggestion[] | null;
+  /** Two people were in front of the camera: nobody was recognised. */
+  multiple_faces?: boolean;
 };
 
 type LinkCaptureResult = {
@@ -532,6 +534,16 @@ export default function KioskPage() {
         await loadCurrentBookings(foundVisitor);
         setStep("welcome-back");
         setVoiceOpen(true);
+        return;
+      }
+
+      if (result.multiple_faces) {
+        // Never guess between two people (and never search the web for a bystander).
+        await scanner.onResult?.("not-found");
+        setScanState("idle");
+        setFacecheckSuggestions(null);
+        setError("I can see more than one person. Please step forward on your own, then scan again.");
+        setStep("identify");
         return;
       }
 

@@ -3,11 +3,11 @@
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import {
+  Accessibility,
   ArrowLeft,
   CalendarDays,
   Check,
   KeyRound,
-  Mic,
   Phone,
   Sparkles,
   User,
@@ -21,7 +21,10 @@ import { PhotoImg, preloadRoomPhotos, roomDescription, ROOM_FACTS, ROOM_PHOTOS, 
 import { BrandHero, EyebrowMark, HeaderBrand, LogoCountdown, PanelBrand } from "@/components/kiosk/Brand";
 import { Typewriter } from "@/components/kiosk/Typewriter";
 import { VisitorPass, type VisitorPassDetails } from "@/components/kiosk/VisitorPass";
+import { durationLabel, formatClock, formatDay, headerDate, LangProvider, localDigits, toLatinDigits, translate, useLang, useTranslationVersion, type Lang } from "@/components/kiosk/i18n";
 import { usePresence } from "@/components/kiosk/usePresence";
+import { FloorMap, type BookableRoom } from "@/components/kiosk/FloorMap";
+import { AboutExplore } from "@/components/kiosk/AboutExplore";
 import { navigateBack, withViewTransition } from "@/components/kiosk/viewTransition";
 import { FaceScanOverlay, type KycMode, type KycPhase } from "@/components/kiosk/FaceScanOverlay";
 import {
@@ -53,7 +56,6 @@ import {
   isPastDateTime,
   toDateInputValue,
 } from "@/lib/time";
-import { centerRoomOptions } from "@/lib/kiosk-content";
 
 type Visitor = {
   visitor_id: number;
@@ -155,7 +157,7 @@ type BookingForm = {
 // "identify" = the "How would you like to continue?" screen (Figma node
 // 665-2650), shown after the start screen whether or not the face search
 // returned suggestions. Kept local so lib/flow.ts doesn't need to change.
-type Step = KioskStep | "identify" | "report-issue" | "room-select";
+type Step = KioskStep | "identify" | "report-issue" | "room-select" | "explore";
 
 const todayIso = () => toDateInputValue();
 
@@ -163,6 +165,19 @@ const todayIso = () => toDateInputValue();
 // or "Finish" on welcome-back), the kiosk counts down this many seconds and
 // then returns to the check-in screen for the next visitor.
 const AUTO_RETURN_SECONDS = 5;
+
+// "Are you still there?": after this long without a touch mid-visit, a
+// short countdown appears, then the kiosk clears for the next visitor.
+const IDLE_MS = 45_000;
+const IDLE_PROMPT_SECONDS = 10;
+
+type RoomAvailability = {
+  zone_id: string;
+  zone_name: string;
+  status: "available" | "busy" | "closed";
+  busy_until: string | null;
+  busy: Array<{ start: string; end: string }>;
+};
 // The visitor pass (booking / event confirmed) stays longer so there's
 // time to read it before the kiosk returns to the start.
 const PASS_RETURN_SECONDS = 10;
@@ -288,7 +303,8 @@ export default function KioskPage() {
   // components/kiosk/viewTransition.ts.
   const setStep = useCallback((next: SetStateAction<Step>) => {
     if (typeof next !== "function" && next === stepRef.current) return;
-    withViewTransition(() => setStepNow(next));
+    // Going to the thank-you screen, the header logo grows into the countdown.
+    withViewTransition(() => setStepNow(next), undefined, next === "thank-you");
   }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -301,6 +317,16 @@ export default function KioskPage() {
   // scan starts then, so the visitor has had a moment to face the camera.
   const [greetingReady, setGreetingReady] = useState(false);
   const [kycPhase, setKycPhase] = useState<KycPhase | null>(null);
+  // Language (English / Arabic) and reach mode; both reset for each visitor.
+  const [lang, setLang] = useState<Lang>("en");
+  const t = (text: string, vars?: Record<string, string | number>) => translate(lang, text, vars);
+  useTranslationVersion(); // re-render when automatic translations (event names etc.) arrive
+  const [reachMode, setReachMode] = useState(false);
+  // The room the map should open on (null = plain map).
+  const [mapFocus, setMapFocus] = useState<string | null>(null);
+  const [idlePrompt, setIdlePrompt] = useState(false);
+  // Live room schedule from GET /api/kiosk/room-availability.
+  const [availability, setAvailability] = useState<{ key: string; rooms: RoomAvailability[] } | null>(null);
   const [issueText, setIssueText] = useState("");
   // Guest pressed Reserve slot / Register for event: registration sheet
   // opens over the same screen, then that action finishes automatically.
@@ -386,6 +412,9 @@ export default function KioskPage() {
     setIssueText("");
     setThankYouKind("visit");
     setQuickRegister(null);
+    setLang("en");
+    setReachMode(false);
+    setIdlePrompt(false);
     setSelectedEvent(null);
     setConfirmation(null);
     setBookingForm({ ...initialBookingForm, date: todayIso() });
@@ -606,6 +635,24 @@ export default function KioskPage() {
     setKycPhase(null);
     // Backing out of registration returns to the face-consent choice.
     if (kycMode === "enroll") setStep("facial-consent");
+  }
+
+  // Explore's "Talk to us" buttons: the CX request, about setting up.
+  function handleExploreContact() {
+    setOtherReason("start_company");
+    void handleServiceSelect("other");
+  }
+
+  // "Book" on the floor map: straight to that room's booking form.
+  function handleMapBook(room: BookableRoom) {
+    if (room === "meetingroom1" || room === "meetingroom2") {
+      setSelectedService("meeting_room");
+      setError(null);
+      setBookingForm((value) => ({ ...value, zoneId: room === "meetingroom1" ? "MR_1" : "MR_2" }));
+      setStep("booking");
+      return;
+    }
+    void handleServiceSelect(room === "podcast" ? "podcast_studio" : "tiktok_studio");
   }
 
   function goHome() {
@@ -982,7 +1029,7 @@ export default function KioskPage() {
     }
 
     if (service === "business_center") {
-      setStep("center");
+      setStep("explore"); // Explore: all spaces as a list (Find a place is the map)
       return;
     }
 
@@ -1035,14 +1082,14 @@ export default function KioskPage() {
         title: "Booking Confirmed",
         message: `${createdBooking.room_name} is reserved from ${formatTime(createdBooking.booking_time_start)} to ${formatTime(createdBooking.booking_time_end)}.`,
         pass: {
-          status: "Booking confirmed",
+          status: t("Booking confirmed"),
           name: activeVisitor.visitor_name,
-          placeLabel: "Room",
-          place: createdBooking.room_name,
-          date: formatPassDate(bookingForm.date),
-          time: `${formatSlot(formatTime(createdBooking.booking_time_start))} – ${formatSlot(formatTime(createdBooking.booking_time_end))}`,
-          timeDetail: formatDuration(Number.parseInt(bookingForm.duration, 10)),
-          note: "Tap Find a place any time for directions to your room.",
+          placeLabel: t("Room"),
+          place: t(createdBooking.room_name),
+          date: formatDay(lang, bookingForm.date),
+          time: `${formatClock(lang, formatTime(createdBooking.booking_time_start))} – ${formatClock(lang, formatTime(createdBooking.booking_time_end))}`,
+          timeDetail: durationLabel(lang, Number.parseInt(bookingForm.duration, 10), formatDuration(Number.parseInt(bookingForm.duration, 10))),
+          note: t("Tap Find a place any time for directions to your room."),
           photo:
             selectedService === "meeting_room"
               ? ROOM_PHOTOS[bookingForm.zoneId] ?? ROOM_PHOTOS.MR_1
@@ -1089,14 +1136,14 @@ export default function KioskPage() {
         title: "Event Registration Confirmed",
         message: `You are registered for ${selectedEvent.event_name}. Please be seated 10 minutes before the event starts.`,
         pass: {
-          status: "Registered for event",
+          status: t("Registered for event"),
           name: activeVisitor.visitor_name,
-          placeLabel: "Event",
+          placeLabel: t("Event"),
           place: selectedEvent.event_name,
-          date: formatPassDate(todayIso()),
-          time: formatSlot(formatTime(selectedEvent.event_time_start)),
+          date: formatDay(lang, todayIso()),
+          time: formatClock(lang, formatTime(selectedEvent.event_time_start)),
           timeDetail: selectedEvent.event_location,
-          note: "Please be seated 10 minutes before the event starts.",
+          note: t("Please be seated 10 minutes before the event starts."),
         },
       });
     } catch (eventError) {
@@ -1183,16 +1230,111 @@ export default function KioskPage() {
 
   const onStart = step === "start" || step === "identify";
 
+  // "Are you still there?" -- watch for a quiet screen mid-visit. Not on
+  // the welcome screen, the finish screens (they have their own countdown),
+  // during a voice conversation (people talk, not touch) or a face scan.
+  const idleWatch = step !== "start" && step !== "thank-you" && !confirmation && !voiceOpen && !kycPhase;
+  useEffect(() => {
+    if (!idleWatch) {
+      setIdlePrompt(false);
+      return;
+    }
+    if (idlePrompt) return;
+    let timer = 0;
+    const restart = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setIdlePrompt(true), IDLE_MS);
+    };
+    const events = ["pointerdown", "keydown", "input", "wheel", "touchstart"] as const;
+    events.forEach((name) => window.addEventListener(name, restart, { passive: true }));
+    restart();
+    return () => {
+      window.clearTimeout(timer);
+      events.forEach((name) => window.removeEventListener(name, restart));
+    };
+  }, [idleWatch, idlePrompt, step]);
+
+  // Live room schedule: today's on "Choose your room", the chosen day's on
+  // the booking form (for "busy until" and the clash check).
+  const availabilityService =
+    step === "room-select" || step === "booking" ? "meeting_room" : step === "booking-podcast" ? "podcast_studio" : step === "booking-tiktok" ? "tiktok_studio" : null;
+  const availabilityDate = step === "room-select" ? todayIso() : bookingForm.date;
+  const availabilityKey = availabilityService && availabilityDate ? `${availabilityService}|${availabilityDate}` : null;
+  useEffect(() => {
+    if (!availabilityKey || !availabilityService) return;
+    let cancelled = false;
+    requestJson<{ rooms: RoomAvailability[] }>(
+      `/api/kiosk/room-availability?service_type=${availabilityService}&booking_date=${availabilityDate}`,
+    )
+      .then((data) => {
+        if (!cancelled) setAvailability({ key: availabilityKey, rooms: data?.rooms ?? [] });
+      })
+      .catch(() => {
+        // Not critical: without it the kiosk simply doesn't show live status,
+        // and the backend still rejects clashing bookings on submit.
+        if (!cancelled) setAvailability(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [availabilityKey, availabilityService, availabilityDate]);
+  const roomsNow = availability && availability.key === availabilityKey ? availability.rooms : [];
+  // Studios have a single room: use whichever the backend returns (its real
+  // zone id), so this works whatever the studio ids are in the database.
+  const pickRoom = (rooms: RoomAvailability[]) =>
+    selectedService === "meeting_room" ? rooms.find((room) => room.zone_id === bookingForm.zoneId) : rooms[0];
+  const bookingBusy = pickRoom(roomsNow)?.busy ?? [];
+
+  // "Available now / Busy until …" is about right now, so the booking form
+  // also loads TODAY's status, even when the visitor is booking another day.
+  const onBookingForm = step === "booking" || step === "booking-podcast" || step === "booking-tiktok";
+  const nowKey = onBookingForm && availabilityService ? `${availabilityService}|${todayIso()}` : null;
+  const [availabilityToday, setAvailabilityToday] = useState<{ key: string; rooms: RoomAvailability[] } | null>(null);
+  useEffect(() => {
+    if (!nowKey || !availabilityService) return;
+    if (nowKey === availabilityKey) return; // same request as above (booking today)
+    let cancelled = false;
+    requestJson<{ rooms: RoomAvailability[] }>(
+      `/api/kiosk/room-availability?service_type=${availabilityService}&booking_date=${todayIso()}`,
+    )
+      .then((data) => {
+        if (!cancelled) setAvailabilityToday({ key: nowKey, rooms: data?.rooms ?? [] });
+      })
+      .catch(() => {
+        if (!cancelled) setAvailabilityToday(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nowKey, availabilityKey, availabilityService]);
+  const roomsToday = nowKey === availabilityKey ? roomsNow : availabilityToday?.key === nowKey ? availabilityToday.rooms : [];
+  const bookingRoomNow = pickRoom(roomsToday);
+
   // One countdown for every "visit finished" moment. Confirmations go
   // straight back to the start (no extra thank-you screen in between);
   // tapping "Other services" on the dialog cancels it.
   const visitFinished = step === "thank-you" || confirmation !== null;
   const returnSeconds = confirmation ? PASS_RETURN_SECONDS : AUTO_RETURN_SECONDS;
   const secondsLeft = useCountdown(visitFinished, returnSeconds, finishVisit, confirmation ?? step);
+  const idleSecondsLeft = useCountdown(
+    idlePrompt,
+    IDLE_PROMPT_SECONDS,
+    () => {
+      setIdlePrompt(false);
+      finishVisit();
+    },
+    idlePrompt,
+  );
 
   return (
     <main className="kiosk-stage">
-      <div className="kiosk-frame" data-voice={voiceOpen ? "on" : "off"}>
+      <LangProvider value={lang}>
+      <div
+        className={reachMode ? "kiosk-frame reach" : "kiosk-frame"}
+        data-voice={voiceOpen ? "on" : "off"}
+        dir={lang === "ar" ? "rtl" : "ltr"}
+        lang={lang}
+      >
         <KioskBackdrop
           photo={
             step === "booking"
@@ -1210,12 +1352,27 @@ export default function KioskPage() {
 
         <section className="kiosk-panel">
           {step !== "start" ? <PanelBrand /> : null}
+          {/* Language + reach mode are chosen at the start of a visit (they
+              then apply to every screen), so the switches sit on the entry
+              screens only and never cover a form. */}
+          {step === "start" || step === "identify" || step === "service-selection" ? (
+          <KioskTools
+            lang={lang}
+            onLang={(next) => {
+              setLang(next);
+              // Sky picks up the new language from his next conversation.
+              if (voiceOpen) setVoiceOpen(false);
+            }}
+            onReach={() => setReachMode((on) => !on)}
+            reach={reachMode}
+          />
+          ) : null}
           {error && !quickRegister ? <StatusBanner tone="error" message={error} /> : null}
 
           {step === "start" ? (
             <Screen hero>
               <BrandHero />
-              <Eyebrow key={presence} label={START_TEXT[presence].eyebrow} />
+              <Eyebrow key={`${presence}-${lang}`} label={START_TEXT[presence].eyebrow} />
               <div className="hero-texts">
                 <Typewriter
                   as="h1"
@@ -1223,13 +1380,13 @@ export default function KioskPage() {
                   onDone={() => {
                     if (presence === "engaged") setGreetingReady(true);
                   }}
-                  text={START_TEXT[presence].title}
+                  text={t(START_TEXT[presence].title)}
                 />
                 <Typewriter
                   className={presence === "idle" ? "hero-copy idle" : "hero-copy"}
                   delayMs={presence === "engaged" ? 700 : 900}
                   eraseMs={10}
-                  text={START_TEXT[presence].copy}
+                  text={t(START_TEXT[presence].copy)}
                   typeMs={24}
                 />
               </div>
@@ -1238,11 +1395,7 @@ export default function KioskPage() {
 
           {step === "identify" ? (
             <Screen>
-              <TitleBlock eyebrow="Check in">
-                How would you like
-                <br />
-                to continue?
-              </TitleBlock>
+              <TitleBlock eyebrow="Check in">{"How would you like\nto continue?"}</TitleBlock>
               <div className={facecheckSuggestions && facecheckSuggestions.length > 0 ? "options-section tight" : "options-section"}>
                 {facecheckSuggestions && facecheckSuggestions.length > 0 ? (
                   <>
@@ -1257,8 +1410,8 @@ export default function KioskPage() {
                           type="button"
                         >
                           <span className="match-head">
-                            <span className="dim">Match</span>
-                            <span>{typeof candidate.score === "number" ? `${Math.round(candidate.score * 100)}%` : ""}</span>
+                            <span className="dim">{t("Match")}</span>
+                            <span>{typeof candidate.score === "number" ? localDigits(lang, `${Math.round(candidate.score * 100)}%`) : ""}</span>
                           </span>
                           <span className="match-photo">
                             {candidate.thumbnail_base64 ? (
@@ -1275,7 +1428,7 @@ export default function KioskPage() {
                     <Divider>None of these options — choose one of the options</Divider>
                   </>
                 ) : (
-                  <Divider>We couldn&rsquo;t find your profile — choose one of the options</Divider>
+                  <Divider>{"We couldn’t find your profile — choose one of the options"}</Divider>
                 )}
                 <div className="card-grid">
                   {identifyOptions.map((option) => (
@@ -1288,7 +1441,7 @@ export default function KioskPage() {
                     >
                       <option.icon />
                       <span className="card-label">
-                        {option.label}
+                        {t(option.label)}
                       </span>
                       <CornerTick />
                     </button>
@@ -1300,11 +1453,7 @@ export default function KioskPage() {
 
           {step === "service-selection" ? (
             <Screen>
-              <TitleBlock eyebrow="Welcome">
-                What brings you to
-                <br />
-                Innovation City today?
-              </TitleBlock>
+              <TitleBlock eyebrow="Welcome">{"What brings you to\nInnovation City today?"}</TitleBlock>
               <div className="options-section">
                 <Divider>Talk to the assistant or select an option</Divider>
                 <div className="card-grid">
@@ -1317,8 +1466,8 @@ export default function KioskPage() {
                       type="button"
                     >
                       <card.icon />
-                      <span className="service-title">{card.title}</span>
-                      <span className="service-copy">{card.description}</span>
+                      <span className="service-title">{t(card.title)}</span>
+                      <span className="service-copy">{t(card.description)}</span>
                       <CornerTick />
                     </button>
                   ))}
@@ -1330,7 +1479,7 @@ export default function KioskPage() {
           {step === "profile-lookup" ? (
             <Screen onBack={() => setStep("identify")}>
               <TitleBlock eyebrow="Check in">Find your profile</TitleBlock>
-              <p className="screen-copy">Enter your details so we can find your profile.</p>
+              <p className="screen-copy">{t("Enter your details so we can find your profile.")}</p>
               <form className="stack" onSubmit={handleProfileLookup}>
                 <Panel>
                   <Field
@@ -1344,10 +1493,10 @@ export default function KioskPage() {
                   <Field
                     icon={<Phone />}
                     label="Mobile number"
-                    onChange={(event) => setLookup((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
+                    onChange={(event) => setLookup((value) => ({ ...value, mobile_number: toLatinDigits(event.target.value).replace(/\D/g, "") }))}
                     placeholder="50 123 4567"
                     required
-                    value={lookup.mobile_number}
+                    value={localDigits(lang, lookup.mobile_number)}
                     leadingAddon={
                       <CountryCodeSelect
                         onChange={(countryCode) => setLookup((value) => ({ ...value, country_code: countryCode }))}
@@ -1358,8 +1507,8 @@ export default function KioskPage() {
                 </Panel>
                 <PrimaryButton disabled={busy} type="submit">Continue</PrimaryButton>
                 <p className="inline-note">
-                  Don&rsquo;t have a profile?{" "}
-                  <button onClick={handleRegisterLink} type="button">Create one</button>
+                  {t("Don’t have a profile?")}{" "}
+                  <button onClick={handleRegisterLink} type="button">{t("Create one")}</button>
                 </p>
               </form>
             </Screen>
@@ -1368,7 +1517,7 @@ export default function KioskPage() {
           {step === "register" ? (
             <Screen onBack={() => setStep("identify")}>
               <TitleBlock eyebrow="New profile">Create your profile</TitleBlock>
-              <p className="screen-copy">Fill in your details, or tell the assistant.</p>
+              <p className="screen-copy">{t("Fill in your details, or tell the assistant.")}</p>
               <form className="stack" onSubmit={handleRegistration}>
                 <Panel>
                   <Field
@@ -1380,10 +1529,10 @@ export default function KioskPage() {
                   />
                   <Field
                     label="Mobile number"
-                    onChange={(event) => setRegistration((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
+                    onChange={(event) => setRegistration((value) => ({ ...value, mobile_number: toLatinDigits(event.target.value).replace(/\D/g, "") }))}
                     placeholder="50 123 4567"
                     required
-                    value={registration.mobile_number}
+                    value={localDigits(lang, registration.mobile_number)}
                     leadingAddon={
                       <CountryCodeSelect
                         onChange={(countryCode) => setRegistration((value) => ({ ...value, country_code: countryCode }))}
@@ -1400,7 +1549,7 @@ export default function KioskPage() {
                     value={registration.email}
                   />
                   <div className="toggle-field">
-                    <span>I am visiting as</span>
+                    <span>{t("I am visiting as")}</span>
                     <div className="segmented-toggle">
                       {(["client", "visitor"] as const).map((type) => (
                         <button
@@ -1409,7 +1558,7 @@ export default function KioskPage() {
                           onClick={() => setRegistration((value) => ({ ...value, visitor_type: type }))}
                           type="button"
                         >
-                          {type === "client" ? "Client" : "Visitor"}
+                          {t(type === "client" ? "Client" : "Visitor")}
                         </button>
                       ))}
                     </div>
@@ -1422,15 +1571,11 @@ export default function KioskPage() {
 
           {step === "facial-consent" ? (
             <Screen>
-              <TitleBlock eyebrow="Faster check-in">
-                Recognise me
-                <br />
-                next time?
-              </TitleBlock>
-              <p className="screen-copy">A face scan lets the kiosk welcome you by name on your next visit.</p>
+              <TitleBlock eyebrow="Faster check-in">{"Recognise me\nnext time?"}</TitleBlock>
+              <p className="screen-copy">{t("A face scan lets the kiosk welcome you by name on your next visit.")}</p>
               <button className="glass-card consent-card" onClick={() => setConsentChecked((value) => !value)} type="button">
                 <span className="check-box">{consentChecked ? <Check /> : null}</span>
-                <span>I understand and consent to using facial recognition for future check-ins.</span>
+                <span>{t("I understand and consent to using facial recognition for future check-ins.")}</span>
               </button>
               <PrimaryButton disabled={busy || !consentChecked} onClick={() => handleConsent(true)}>
                 Yes, enable face check-in
@@ -1463,39 +1608,35 @@ export default function KioskPage() {
 
           {step === "welcome-back" ? (
             <Screen>
-              <TitleBlock eyebrow="Welcome back">
-                Good to see you,
-                <br />
-                {firstName}
-              </TitleBlock>
+              <TitleBlock eyebrow="Welcome back">{t("Good to see you,\n{name}", { name: firstName })}</TitleBlock>
               <Panel>
                 {currentBookings.length > 0 ? (
                   <>
                     <div className="mini-heading">
                       <CalendarDays />
                       <div>
-                        <strong>{currentBookings.length === 1 ? "Your booking today" : `Your ${currentBookings.length} bookings today`}</strong>
-                        <span>Use Find a place for directions to your room.</span>
+                        <strong>{currentBookings.length === 1 ? t("Your booking today") : t("Your {n} bookings today", { n: currentBookings.length })}</strong>
+                        <span>{t("Use Find a place for directions to your room.")}</span>
                       </div>
                     </div>
                     <div className="booking-summary-list">
                       {currentBookings.map((booking) => (
                         <div className="booking-summary-item" key={booking.booking_id}>
-                          <b>{formatTime(booking.booking_time_start)} – {formatTime(booking.booking_time_end)}</b>
-                          <span>{booking.room_name}</span>
+                          <b>{formatClock(lang, formatTime(booking.booking_time_start))} – {formatClock(lang, formatTime(booking.booking_time_end))}</b>
+                          <span>{t(booking.room_name)}</span>
                         </div>
                       ))}
                     </div>
                   </>
                 ) : (
                   <>
-                    <strong>No bookings today</strong>
-                    <p className="panel-copy">Talk to the assistant or pick a service to get started.</p>
+                    <strong>{t("No bookings today")}</strong>
+                    <p className="panel-copy">{t("Talk to the assistant or pick a service to get started.")}</p>
                   </>
                 )}
               </Panel>
               <PrimaryButton onClick={() => setStep(currentBookings.length > 0 ? "thank-you" : "service-selection")}>
-                {currentBookings.length > 0 ? "Finish" : "See services"}
+                {t(currentBookings.length > 0 ? "Finish" : "See services")}
               </PrimaryButton>
               {currentBookings.length > 0 ? (
                 <OutlineButton onClick={() => setStep("service-selection")}>Other services</OutlineButton>
@@ -1519,6 +1660,7 @@ export default function KioskPage() {
                     }}
                     selected={bookingForm.zoneId === zoneId}
                     src={ROOM_PHOTOS[zoneId]}
+                    status={roomsNow.find((room) => room.zone_id === zoneId)}
                   />
                 ))}
               </div>
@@ -1534,15 +1676,17 @@ export default function KioskPage() {
                 onChange={setBookingForm}
                 onSubmit={handleBooking}
                 service={selectedService}
+                taken={bookingBusy}
+                roomNow={bookingRoomNow}
               />
             </Screen>
           ) : null}
 
           {step === "events" ? (
             <Screen scroll onBack={() => setStep("service-selection")}>
-              <TitleBlock eyebrow="Events">Today&rsquo;s events</TitleBlock>
+              <TitleBlock eyebrow="Events">{"Today’s events"}</TitleBlock>
               <div className="event-list">
-                {events.length === 0 ? <Panel><strong>No events are scheduled for today.</strong></Panel> : null}
+                {events.length === 0 ? <Panel><strong>{t("No events are scheduled for today.")}</strong></Panel> : null}
                 {events.map((eventItem) => (
                   <button
                     className={["glass-card", "event-card", selectedEvent?.event_id === eventItem.event_id ? "selected" : ""].join(" ")}
@@ -1550,14 +1694,14 @@ export default function KioskPage() {
                     onClick={() => setSelectedEvent(eventItem)}
                     type="button"
                   >
-                    <strong>{eventItem.event_name}</strong>
-                    <span>{formatTime(eventItem.event_time_start)} · {eventItem.event_location}</span>
+                    <strong>{t(eventItem.event_name)}</strong>
+                    <span>{formatClock(lang, formatTime(eventItem.event_time_start))} · {t(eventItem.event_location)}</span>
                     <CornerTick />
                   </button>
                 ))}
               </div>
               {selectedEvent ? (
-                <p className="screen-copy">Please be seated 10 minutes before {selectedEvent.event_name} starts.</p>
+                <p className="screen-copy">{t("Please be seated 10 minutes before {event} starts.", { event: t(selectedEvent.event_name) })}</p>
               ) : null}
               <PrimaryButton disabled={busy || !selectedEvent} onClick={handleEventRegistration}>
                 Register for event
@@ -1566,20 +1710,17 @@ export default function KioskPage() {
           ) : null}
 
           {step === "center" ? (
-            <Screen scroll onBack={() => setStep("service-selection")}>
-              <TitleBlock eyebrow="Find a place">Explore the center</TitleBlock>
-              <p className="screen-copy">Ask Sky about any room on the floor, or browse below.</p>
-              <div className="room-info-list">
-                {centerRoomOptions.map((option) => (
-                  <div className="glass-card room-info" key={option.title}>
-                    <strong>{option.title}</strong>
-                    <span>{option.description}</span>
-                  </div>
-                ))}
-              </div>
-              {!voiceOpen ? (
-                <PrimaryButton onClick={() => setVoiceOpen(true)} icon={<Mic />}>Ask Sky</PrimaryButton>
-              ) : null}
+            <Screen onBack={() => setStep(mapFocus ? "explore" : "service-selection")}>
+              <TitleBlock eyebrow="Find a place">Find your way</TitleBlock>
+              {/* The live dashboard's floor plan, with routes from "You are here". */}
+              <FloorMap initialSelected={mapFocus} key={mapFocus ?? "map"} onBook={handleMapBook} />
+            </Screen>
+          ) : null}
+
+          {step === "explore" ? (
+            <Screen onBack={() => setStep("service-selection")}>
+              <TitleBlock eyebrow="Explore">{"Welcome to\nInnovation City"}</TitleBlock>
+              <AboutExplore onContact={handleExploreContact} />
             </Screen>
           ) : null}
 
@@ -1612,14 +1753,9 @@ export default function KioskPage() {
 
           {step === "report-issue" ? (
             <Screen onBack={() => setStep("identify")}>
-              <TitleBlock eyebrow="Recognition issue">
-                We&rsquo;re sorry
-                <br />
-                about that
-              </TitleBlock>
+              <TitleBlock eyebrow="Recognition issue">{"We’re sorry\nabout that"}</TitleBlock>
               <p className="screen-copy">
-                Something didn&rsquo;t go right with recognising you. We&rsquo;d love to hear what happened so we can
-                fix it.
+                {t("Something didn’t go right with recognising you. We’d love to hear what happened so we can fix it.")}
               </p>
               <form className="stack" onSubmit={handleIssueSubmit}>
                 <Panel>
@@ -1645,20 +1781,16 @@ export default function KioskPage() {
                 {thankYouKind === "report" ? (
                   <>
                     <h1 className="screen-title">
-                      Thanks for
-                      <br />
-                      letting us know
+                      <Lines text={t("Thanks for\nletting us know")} />
                     </h1>
-                    <p className="hero-copy">Our team will look into it. We&rsquo;re sorry for the trouble.</p>
+                    <p className="hero-copy">{t("Our team will look into it. We’re sorry for the trouble.")}</p>
                   </>
                 ) : (
                   <>
                     <h1 className="screen-title">
-                      Thank you
-                      <br />
-                      for visiting
+                      <Lines text={t("Thank you\nfor visiting")} />
                     </h1>
-                    <p className="hero-copy">Enjoy your time at Innovation City.</p>
+                    <p className="hero-copy">{t("Enjoy your time at Innovation City.")}</p>
                   </>
                 )}
               </div>
@@ -1683,15 +1815,48 @@ export default function KioskPage() {
           onNeedFaceEnrollment={handleVoiceFaceEnrollment}
           onFormFieldUpdate={handleVoiceFormFieldUpdate}
           onSkyStateChange={setSkyState}
+          language={lang}
         />
 
         <BottomNav
           firstTab={onStart ? "plan" : "home"}
           onFirstTab={onStart ? () => setStep("service-selection") : goHome}
-          onFindPlace={() => setStep("center")}
+          onFindPlace={() => {
+            setMapFocus(null);
+            setStep("center");
+          }}
           onSky={handleSkyPress}
           skyState={skyState}
         />
+
+        {idlePrompt ? (
+          <div className="frame-modal idle-modal">
+            <div className="idle-card" role="alertdialog" aria-live="assertive">
+              <div className="idle-ring">
+                <svg aria-hidden viewBox="0 0 200 200">
+                  <circle className="idle-ring-track" cx="100" cy="100" r="88" />
+                  <circle className="idle-ring-bar" cx="100" cy="100" r="88" style={{ animationDuration: `${IDLE_PROMPT_SECONDS}s` }} />
+                </svg>
+                <b>{localDigits(lang, idleSecondsLeft)}</b>
+              </div>
+              <h2>{t("Are you still there?")}</h2>
+              <p>
+                <Lines text={t("For your privacy, this screen will clear soon.\nTap below to keep going.")} />
+              </p>
+              <div className="pass-actions">
+                <OutlineButton
+                  onClick={() => {
+                    setIdlePrompt(false);
+                    finishVisit();
+                  }}
+                >
+                  Start over
+                </OutlineButton>
+                <PrimaryButton onClick={() => setIdlePrompt(false)}>I'm still here</PrimaryButton>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         {quickRegister ? (
           <div className="frame-modal" onClick={(event) => event.target === event.currentTarget && setQuickRegister(null)}>
@@ -1699,13 +1864,15 @@ export default function KioskPage() {
               <div className="qr-head">
                 <span className="eyebrow">
                   <EyebrowMark />
-                  {quickRegister.action === "booking" ? "Almost there" : "One more step"}
+                  {t(quickRegister.action === "booking" ? "Almost there" : "One more step")}
                 </span>
-                <h2>{quickRegister.tab === "new" ? "Quick registration" : "Find your profile"}</h2>
+                <h2>{t(quickRegister.tab === "new" ? "Quick registration" : "Find your profile")}</h2>
                 <p>
-                  {quickRegister.action === "booking"
-                    ? "Your chosen time is saved — we just need your details to confirm the booking."
-                    : "We just need your details to register you for the event."}
+                  {t(
+                    quickRegister.action === "booking"
+                      ? "Your chosen time is saved — we just need your details to confirm the booking."
+                      : "We just need your details to register you for the event.",
+                  )}
                 </p>
               </div>
 
@@ -1722,7 +1889,7 @@ export default function KioskPage() {
                     role="tab"
                     type="button"
                   >
-                    {tab === "new" ? "I'm new" : "I have a profile"}
+                    {t(tab === "new" ? "I'm new" : "I have a profile")}
                   </button>
                 ))}
               </div>
@@ -1746,10 +1913,10 @@ export default function KioskPage() {
                         value={registration.country_code}
                       />
                     }
-                    onChange={(event) => setRegistration((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
+                    onChange={(event) => setRegistration((value) => ({ ...value, mobile_number: toLatinDigits(event.target.value).replace(/\D/g, "") }))}
                     placeholder="50 123 4567"
                     required
-                    value={registration.mobile_number}
+                    value={localDigits(lang, registration.mobile_number)}
                   />
                   <Field
                     label="Email address"
@@ -1760,7 +1927,7 @@ export default function KioskPage() {
                     value={registration.email}
                   />
                   <div className="toggle-field">
-                    <span>I am visiting as</span>
+                    <span>{t("I am visiting as")}</span>
                     <div className="segmented-toggle">
                       {(["client", "visitor"] as const).map((type) => (
                         <button
@@ -1769,7 +1936,7 @@ export default function KioskPage() {
                           onClick={() => setRegistration((value) => ({ ...value, visitor_type: type }))}
                           type="button"
                         >
-                          {type === "client" ? "Client" : "Visitor"}
+                          {t(type === "client" ? "Client" : "Visitor")}
                         </button>
                       ))}
                     </div>
@@ -1793,10 +1960,10 @@ export default function KioskPage() {
                         value={lookup.country_code}
                       />
                     }
-                    onChange={(event) => setLookup((value) => ({ ...value, mobile_number: event.target.value.replace(/\D/g, "") }))}
+                    onChange={(event) => setLookup((value) => ({ ...value, mobile_number: toLatinDigits(event.target.value).replace(/\D/g, "") }))}
                     placeholder="50 123 4567"
                     required
-                    value={lookup.mobile_number}
+                    value={localDigits(lang, lookup.mobile_number)}
                   />
                 </div>
               )}
@@ -1812,7 +1979,7 @@ export default function KioskPage() {
                   Cancel
                 </OutlineButton>
                 <PrimaryButton disabled={busy} type="submit">
-                  {quickRegister.action === "booking" ? "Confirm booking" : "Join event"}
+                  {t(quickRegister.action === "booking" ? "Confirm booking" : "Join event")}
                 </PrimaryButton>
               </div>
             </form>
@@ -1870,6 +2037,7 @@ export default function KioskPage() {
           </div>
         ) : null}
       </div>
+      </LangProvider>
     </main>
   );
 }
@@ -1973,22 +2141,24 @@ function TopBar({ showBrand, morphMark }: { showBrand: boolean; morphMark: boole
 
   const timeZone = "Asia/Dubai";
   const time = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone });
-  const day = now.toLocaleDateString("en-US", { weekday: "long", timeZone });
-  const date = now.toLocaleDateString("en-US", { month: "long", day: "numeric", timeZone });
+  const { lang, t } = useLang();
+  const { day, date } = headerDate(lang, now);
 
   return (
     <header className="top-bar">
       {showBrand ? <HeaderBrand morphMark={morphMark} /> : null}
       <div className="top-block">
-        <p className="top-value">{weather ? `${weather.temp} C°` : "-- C°"}</p>
+        <p className="top-value">
+          {lang === "ar" ? (weather ? `${localDigits(lang, weather.temp)}°م` : "--°م") : weather ? `${weather.temp} C°` : "-- C°"}
+        </p>
         <p className="top-meta">
-          <span>UAE</span>
+          <span>{t("UAE")}</span>
           <i />
-          <span className="dim">Ras Al Khaimah</span>
+          <span className="dim">{t("Ras Al Khaimah")}</span>
         </p>
       </div>
       <div className="top-block end">
-        <p className="top-value">{time}</p>
+        <p className="top-value">{localDigits(lang, time)}</p>
         <p className="top-meta">
           <span>{day}</span>
           <i />
@@ -2012,16 +2182,17 @@ function BottomNav({
   onSky: () => void;
   skyState: SkyState;
 }) {
+  const { t } = useLang();
   const active = skyState !== "off";
   return (
     <nav className="bottom-nav">
       <div className="bottom-nav-row">
         <button className="nav-tab" onClick={onFirstTab} type="button">
           <span className="nav-icon">{firstTab === "plan" ? <PlanVisitIcon /> : <HomeIcon />}</span>
-          <span className="nav-label">{firstTab === "plan" ? "Plan your visit" : "Home"}</span>
+          <span className="nav-label">{t(firstTab === "plan" ? "Plan your visit" : "Home")}</span>
         </button>
         <button
-          aria-label={active ? "Stop the AI voice assistant" : "Start the AI voice assistant"}
+          aria-label={t(active ? "Stop the AI voice assistant" : "Start the AI voice assistant")}
           aria-pressed={active}
           className={active ? "nav-tab sky active" : "nav-tab sky"}
           onClick={onSky}
@@ -2030,40 +2201,108 @@ function BottomNav({
           <span className="nav-icon sky-slot">
             <SkyFace height={220} state={skyState} />
           </span>
-          <span className="nav-label">AI voice assistant</span>
+          <span className="nav-label">{t("AI voice assistant")}</span>
         </button>
         <button className="nav-tab" onClick={onFindPlace} type="button">
           <span className="nav-icon"><FindPlaceIcon /></span>
-          <span className="nav-label">Find a place</span>
+          <span className="nav-label">{t("Find a place")}</span>
         </button>
       </div>
     </nav>
   );
 }
 
+/** Bottom of the panel: language switch and reach mode, on every screen. */
+function KioskTools({
+  lang,
+  onLang,
+  reach,
+  onReach,
+}: {
+  lang: Lang;
+  onLang: (lang: Lang) => void;
+  reach: boolean;
+  onReach: () => void;
+}) {
+  const { t } = useLang();
+  return (
+    <div className="kiosk-tools">
+      <div className="lang-switch" role="radiogroup" aria-label="Language / اللغة">
+        <button aria-checked={lang === "en"} className={lang === "en" ? "on" : ""} lang="en" onClick={() => onLang("en")} role="radio" type="button">
+          English
+        </button>
+        <button aria-checked={lang === "ar"} className={lang === "ar" ? "on" : ""} lang="ar" onClick={() => onLang("ar")} role="radio" type="button">
+          العربية
+        </button>
+      </div>
+      <button
+        aria-label={t(reach ? "Turn reach mode off" : "Turn reach mode on")}
+        aria-pressed={reach}
+        className={reach ? "reach-toggle on" : "reach-toggle"}
+        onClick={onReach}
+        type="button"
+      >
+        <Accessibility aria-hidden />
+        <span>{t("Reach mode")}</span>
+      </button>
+    </div>
+  );
+}
+
+function BackLabel() {
+  const { t } = useLang();
+  return <span className="back-label">{t("Back")}</span>;
+}
+
+/** Kiosk-made messages are translated; server messages show as sent. */
+function TranslatedText({ text }: { text: string }) {
+  const { t } = useLang();
+  return <>{t(text)}</>;
+}
+
+/** Text with "\n" line breaks. */
+function Lines({ text }: { text: string }) {
+  const parts = text.split("\n");
+  return (
+    <>
+      {parts.map((part, index) => (
+        <span key={index}>
+          {part}
+          {index < parts.length - 1 ? <br /> : null}
+        </span>
+      ))}
+    </>
+  );
+}
+
+// The building blocks below translate their own text (see i18n.tsx), so
+// screens just pass the English and Arabic follows automatically.
 function Eyebrow({ label }: { label: string }) {
+  const { t } = useLang();
   return (
     <span className="eyebrow">
       <EyebrowMark />
-      {label}
+      {t(label)}
     </span>
   );
 }
 
 function TitleBlock({ eyebrow, children }: { eyebrow: string; children: React.ReactNode }) {
+  const { t } = useLang();
   return (
     <div className="title-block">
       <Eyebrow label={eyebrow} />
-      <h1 className="screen-title">{children}</h1>
+      <h1 className="screen-title">{typeof children === "string" ? <Lines text={t(children)} /> : children}</h1>
     </div>
   );
 }
 
 function Divider({ children }: { children: React.ReactNode }) {
+  const { t } = useLang();
   return (
     <p className="divider">
       <i />
-      <span>{children}</span>
+      <span>{typeof children === "string" ? t(children) : children}</span>
       <i />
     </p>
   );
@@ -2106,7 +2345,7 @@ function Screen({
             <span className="back-circle">
               <ArrowLeft aria-hidden />
             </span>
-            <span className="back-label">Back</span>
+            <BackLabel />
           </button>
         ) : null}
         {children}
@@ -2132,10 +2371,11 @@ function PrimaryButton({
   onClick?: () => void;
   type?: "button" | "submit";
 }) {
+  const { t } = useLang();
   return (
     <button className="primary-btn" disabled={disabled} onClick={onClick} type={type}>
       {icon ? <span className="btn-icon">{icon}</span> : null}
-      {children}
+      {typeof children === "string" ? t(children.trim()) : children}
     </button>
   );
 }
@@ -2151,9 +2391,10 @@ function OutlineButton({
   onClick?: () => void;
   type?: "button" | "submit";
 }) {
+  const { t } = useLang();
   return (
     <button className="outline-btn" disabled={disabled} onClick={onClick} type={type}>
-      {children}
+      {typeof children === "string" ? t(children.trim()) : children}
     </button>
   );
 }
@@ -2162,30 +2403,35 @@ function Field({
   label,
   leadingAddon,
   icon,
+  placeholder,
   ...props
 }: React.InputHTMLAttributes<HTMLInputElement> & {
   label: string;
   leadingAddon?: React.ReactNode;
   icon?: React.ReactNode;
 }) {
+  const { t } = useLang();
+  // Phone numbers and emails always read left-to-right, even in Arabic.
+  const ltr = Boolean(leadingAddon) || props.type === "email";
   return (
     <label className="field">
-      <span className="field-label">{label}</span>
+      <span className="field-label">{t(label)}</span>
       <span className={["input-wrap", leadingAddon ? "with-prefix" : "", icon && !leadingAddon ? "with-icon" : ""].join(" ")}>
         {leadingAddon ? <span className="input-prefix">{leadingAddon}</span> : null}
         {icon && !leadingAddon ? <span className="input-icon">{icon}</span> : null}
-        <input {...props} />
+        <input {...props} dir={ltr ? "ltr" : undefined} placeholder={placeholder ? t(placeholder) : undefined} />
       </span>
     </label>
   );
 }
 
-function TextAreaField({ label, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { label: string }) {
+function TextAreaField({ label, placeholder, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { label: string }) {
+  const { t } = useLang();
   return (
     <label className="field">
-      <span className="field-label">{label}</span>
+      <span className="field-label">{t(label)}</span>
       <span className="input-wrap">
-        <textarea {...props} />
+        <textarea {...props} placeholder={placeholder ? t(placeholder) : undefined} />
       </span>
     </label>
   );
@@ -2195,17 +2441,18 @@ function StatusBanner({ message, tone }: { message: string; tone: "error" | "suc
   return (
     <div className={`status-banner ${tone}`} role={tone === "error" ? "alert" : "status"}>
       {tone === "success" ? <Check /> : null}
-      {message}
+      <TranslatedText text={message} />
     </div>
   );
 }
 
 
 function CountryCodeSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const { t } = useLang();
   return (
     <KioskSelect
       onChange={onChange}
-      options={countryCodeOptions.map(([code, label]) => ({ value: code, label: `${code}  ${label}` }))}
+      options={countryCodeOptions.map(([code, label]) => ({ value: code, label: `\u2066${code}\u2069  ${t(label)}` }))}
       value={value}
       variant="compact"
     />
@@ -2265,13 +2512,20 @@ function BookingFormPanel({
   onChange,
   onSubmit,
   service,
+  taken = [],
+  roomNow,
 }: {
   bookingForm: BookingForm;
   busy: boolean;
   onChange: (value: BookingForm) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   service: ServiceType;
+  /** Times already taken in this room on the chosen day (bookings + events). */
+  taken?: Array<{ start: string; end: string }>;
+  /** The room's status right now (for "Available now / Busy until …"). */
+  roomNow?: RoomAvailability;
 }) {
+  const { lang, t } = useLang();
   const validDates = useMemo(() => bookingDates(), []);
   useEffect(() => preloadRoomPhotos(), []);
 
@@ -2284,7 +2538,26 @@ function BookingFormPanel({
   const photoDescription = service === "meeting_room" ? null : roomDescription(service);
   const photoFacts = service === "meeting_room" ? ROOM_FACTS[bookingForm.zoneId] : ROOM_FACTS[service];
   const validTimes = useMemo(() => timeSlotsFor(bookingForm.date).map((slot) => slot.value), [bookingForm.date]);
-  const durationOptions = bookingDurationOptions(bookingForm.time);
+  const durationOptions = bookingDurationOptions(bookingForm.time).map((option) => ({
+    ...option,
+    label: durationLabel(lang, Number.parseInt(option.value, 10), option.label),
+  }));
+
+  // Clash check, before submitting: does the chosen start (+ duration, or
+  // 30 min if none picked yet) overlap anything already in this room?
+  const minutesOf = (hhmm: string) => toMinutes(hhmm);
+  const overlaps = (start: string, minutes: number) =>
+    taken.some((slot) => minutesOf(start) < minutesOf(slot.end) && minutesOf(start) + minutes > minutesOf(slot.start));
+  const wantedMinutes = Number.parseInt(bookingForm.duration, 10) || 30;
+  const clash = Boolean(bookingForm.time) && overlaps(bookingForm.time, wantedMinutes);
+  // Nearest free start times (on the hour / half hour) to offer instead.
+  const suggestions = clash
+    ? validTimes
+        .filter((time) => minutesOf(time) % 30 === 0 && !overlaps(time, wantedMinutes))
+        .sort((a, b) => Math.abs(minutesOf(a) - minutesOf(bookingForm.time)) - Math.abs(minutesOf(b) - minutesOf(bookingForm.time)))
+        .slice(0, 3)
+        .sort((a, b) => minutesOf(a) - minutesOf(b))
+    : [];
 
   // If the stored date can't be booked any more (e.g. it's after hours
   // today), start on the first day that still has free times.
@@ -2311,6 +2584,7 @@ function BookingFormPanel({
       <RoomPhoto
         description={photoDescription}
         facts={photoFacts}
+        status={roomNow}
         label={photo.label}
         onChange={service === "meeting_room" ? (zoneId) => onChange({ ...bookingForm, zoneId }) : undefined}
         options={
@@ -2327,6 +2601,25 @@ function BookingFormPanel({
       <Panel compact>
         <DatePicker onChange={changeDate} validDates={validDates} value={bookingForm.date} />
         <TimePicker disabled={!bookingForm.date} onChange={changeTime} validTimes={validTimes} value={bookingForm.time} />
+        {clash ? (
+          <div className="slot-clash" role="alert">
+            <b>{t("{time} is already booked", { time: formatClock(lang, bookingForm.time) })}</b>
+            {suggestions.length > 0 ? (
+              <>
+                <span>{t("These times are free in {room}:", { room: t(photo.label) })}</span>
+                <div className="slot-chips">
+                  {suggestions.map((time, index) => (
+                    <button className={index === 0 ? "best" : ""} key={time} onClick={() => changeTime(time)} type="button">
+                      {formatClock(lang, time)}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <span>{t("No other free times on this day.")}</span>
+            )}
+          </div>
+        ) : null}
         <KioskSelect
           disabled={!bookingForm.time}
           label="Duration"
@@ -2338,7 +2631,7 @@ function BookingFormPanel({
         />
       </Panel>
       <PrimaryButton
-        disabled={busy || !bookingForm.date || !bookingForm.time || !bookingForm.duration}
+        disabled={busy || clash || !bookingForm.date || !bookingForm.time || !bookingForm.duration}
         icon={<KeyRound />}
         type="submit"
       >

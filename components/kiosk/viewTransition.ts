@@ -30,7 +30,12 @@ export function navigateBack() {
   pendingDirection = "back";
 }
 
-export function withViewTransition(update: () => void, direction?: NavDirection) {
+/**
+ * @param logoGrows the Innovation City logo ends up BIGGER on the new screen
+ *   (e.g. header -> thank-you countdown); the browser then shows the new,
+ *   larger picture of it so it stays sharp. Implied for "overlay" and "reset".
+ */
+export function withViewTransition(update: () => void, direction?: NavDirection, logoGrows = false) {
   const doc = document as DocumentWithVT;
   const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
@@ -44,6 +49,7 @@ export function withViewTransition(update: () => void, direction?: NavDirection)
   const dir = direction ?? pendingDirection ?? "forward";
   pendingDirection = null;
   document.documentElement.dataset.nav = dir;
+  document.documentElement.dataset.logo = logoGrows || dir === "overlay" || dir === "reset" ? "grow" : "shrink";
 
   const transition = doc.startViewTransition(() => {
     updating = true;
@@ -54,6 +60,9 @@ export function withViewTransition(update: () => void, direction?: NavDirection)
     }
   });
   transition.finished.finally(() => {
-    if (document.documentElement.dataset.nav === dir) delete document.documentElement.dataset.nav;
+    if (document.documentElement.dataset.nav === dir) {
+      delete document.documentElement.dataset.nav;
+      delete document.documentElement.dataset.logo;
+    }
   });
 }

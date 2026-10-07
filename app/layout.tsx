@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Audiowide, Oxanium } from "next/font/google";
+import { Audiowide, Noto_Kufi_Arabic, Oxanium } from "next/font/google";
 import "./globals.css";
 
 // next/font self-hosts these at build time -- no runtime call to
@@ -9,6 +9,13 @@ const oxanium = Oxanium({
   subsets: ["latin"],
   weight: ["400", "500", "600", "700"],
   variable: "--font-oxanium",
+});
+
+// Arabic: a modern Kufi typeface that sits well next to Oxanium/Audiowide.
+const kufiArabic = Noto_Kufi_Arabic({
+  subsets: ["arabic"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-arabic",
 });
 
 const audiowide = Audiowide({
@@ -33,7 +40,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html className={`${oxanium.variable} ${audiowide.variable}`} lang="en" suppressHydrationWarning>
+    <html className={`${oxanium.variable} ${audiowide.variable} ${kufiArabic.variable}`} lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: FIT_SCRIPT }} />
       </head>

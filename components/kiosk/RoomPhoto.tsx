@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Maximize2, X } from "lucide-react";
 import { centerRoomOptions } from "@/lib/kiosk-content";
+import { formatClock, useLang } from "./i18n";
 
 /* -------------------------------------------------------------------------
    Room photo on the booking screens.
@@ -72,6 +73,8 @@ const ROOM_MATCHERS: Record<string, RegExp[]> = {
   MR_2: [/meeting\s*room\s*(2|two)\b/i, /meeting/i],
   podcast_studio: [/podcast/i],
   tiktok_studio: [/tik\s*tok/i],
+  business_center: [/business/i],
+  offices: [/office/i],
 };
 
 export function roomDescription(key: string): string | null {
@@ -98,12 +101,31 @@ export const ROOM_FACTS: Record<string, string[]> = {
 };
 
 function FactChips({ facts, className }: { facts?: string[]; className: string }) {
+  const { t } = useLang();
   if (!facts || facts.length === 0) return null;
   return (
     <span className={className}>
       {facts.map((fact) => (
-        <span key={fact}>{fact}</span>
+        <span key={fact}>{t(fact)}</span>
       ))}
+    </span>
+  );
+}
+
+type RoomStatus = { status: "available" | "busy" | "closed"; busy_until: string | null };
+
+/** Live status pill: "Available now" / "Busy until 3:00 PM" / "Closed". */
+function RoomStatusPill({ status }: { status?: RoomStatus }) {
+  const { lang, t } = useLang();
+  if (!status) return null;
+  return (
+    <span className={`room-status ${status.status}`}>
+      <i />
+      {status.status === "available"
+        ? t("Available now")
+        : status.status === "busy" && status.busy_until
+          ? t("Busy until {time}", { time: formatClock(lang, status.busy_until) })
+          : t("Closed")}
     </span>
   );
 }
@@ -115,11 +137,14 @@ export function RoomPhoto({
   label,
   description,
   facts,
+  status,
   options,
   value,
   onChange,
 }: {
   src: string;
+  /** Live status right now (optional). */
+  status?: RoomStatus;
   /** Short facts (capacity, equipment) shown as chips on the photo. */
   facts?: string[];
   /** Name shown on the photo (when there's no room choice). */
@@ -133,6 +158,7 @@ export function RoomPhoto({
 }) {
   const [failed, setFailed] = useState<Record<string, boolean>>({});
   const [enlarged, setEnlarged] = useState(false);
+  const { t } = useLang();
   // If a photo file is missing, the card just isn't shown.
   if (failed[src] && !options) return null;
 
@@ -150,18 +176,21 @@ export function RoomPhoto({
             src={src}
           />
           <FactChips className="room-photo-facts" facts={facts} />
+          <span className="room-photo-status">
+            <RoomStatusPill status={status} />
+          </span>
           {/* Tap the photo to see it full size. */}
-          <button aria-label={`View ${label} photo full size`} className="room-photo-zoom" onClick={() => setEnlarged(true)} type="button">
+          <button aria-label={t("View {room} photo full size", { room: t(label) })} className="room-photo-zoom" onClick={() => setEnlarged(true)} type="button">
             <Maximize2 aria-hidden />
           </button>
         </>
       ) : (
-        <span className="room-photo-missing">{label}</span>
+        <span className="room-photo-missing">{t(label)}</span>
       )}
 
       <figcaption className="room-photo-bar">
         {options ? (
-          <div className="room-photo-tabs" role="radiogroup" aria-label="Choose a room">
+          <div className="room-photo-tabs" role="radiogroup" aria-label={t("Choose a room")}>
             {options.map((option) => (
               <button
                 aria-checked={value === option.value}
@@ -171,14 +200,14 @@ export function RoomPhoto({
                 role="radio"
                 type="button"
               >
-                {option.label}
+                {t(option.label)}
               </button>
             ))}
           </div>
         ) : (
           <span className="room-photo-label">
-            {label}
-            {description ? <small>{description}</small> : null}
+            {t(label)}
+            {description ? <small>{t(description)}</small> : null}
           </span>
         )}
       </figcaption>
@@ -186,8 +215,8 @@ export function RoomPhoto({
       {enlarged ? (
         <div className="room-photo-viewer" onClick={() => setEnlarged(false)} role="dialog" aria-label={`${label} photo`}>
           <PhotoImg alt={label} src={src} />
-          <span className="room-photo-viewer-label">{label}</span>
-          <button aria-label="Close photo" className="room-photo-viewer-close" onClick={() => setEnlarged(false)} type="button">
+          <span className="room-photo-viewer-label">{t(label)}</span>
+          <button aria-label={t("Close photo")} className="room-photo-viewer-close" onClick={() => setEnlarged(false)} type="button">
             <X aria-hidden />
           </button>
         </div>
@@ -220,15 +249,19 @@ export function RoomChoiceCard({
   facts,
   selected,
   onChoose,
+  status,
 }: {
   src: string;
   label: string;
   description?: string | null;
   facts?: string[];
+  /** Live status from GET /api/kiosk/room-availability (optional). */
+  status?: RoomStatus;
   selected?: boolean;
   onChoose: () => void;
 }) {
   const [failed, setFailed] = useState(false);
+  const { t } = useLang();
   return (
     <button className={selected ? "glass-card room-choice selected" : "glass-card room-choice"} onClick={onChoose} type="button">
       <span className="room-choice-photo">
@@ -238,16 +271,17 @@ export function RoomChoiceCard({
             <PhotoImg alt={label} className="room-photo-img" decoding="async" onAllFailed={() => setFailed(true)} src={src} />
           </>
         ) : (
-          <span className="room-photo-missing">{label}</span>
+          <span className="room-photo-missing">{t(label)}</span>
         )}
+        <RoomStatusPill status={status} />
       </span>
       <span className="room-choice-info">
         <span className="room-choice-text">
-          <b>{label}</b>
-          {description ? <span>{description}</span> : null}
+          <b>{t(label)}</b>
+          {description ? <span>{t(description)}</span> : null}
           <FactChips className="room-choice-facts" facts={facts} />
         </span>
-        <span className="room-choice-cta">Choose</span>
+        <span className="room-choice-cta">{t("Choose")}</span>
       </span>
       <span aria-hidden className="corner-tick">
         <i />

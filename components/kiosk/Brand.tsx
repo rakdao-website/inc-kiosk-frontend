@@ -1,3 +1,5 @@
+"use client";
+
 /* -------------------------------------------------------------------------
    Innovation City brand elements for the kiosk.
 
@@ -14,21 +16,23 @@
    finishVisit() in page.tsx and ::view-transition-* in globals.css).
    ------------------------------------------------------------------------- */
 import type { CSSProperties } from "react";
+import { localDigits, useLang } from "./i18n";
 
 export const MARK_SRC = "/brand/ic-mark.png";
 export const WORDMARK_SRC = "/brand/ic-wordmark-white.png";
-export const TAGLINE = "The Free zone of the future";
+export const TAGLINE = "The free zone of the future";
 
 const MARK_TRANSITION = { viewTransitionName: "ic-mark" } as CSSProperties;
 const WORDMARK_TRANSITION = { viewTransitionName: "ic-wordmark" } as CSSProperties;
 
 /** Big logo + tagline on the welcome / check-in screen. */
 export function BrandHero() {
+  const { t } = useLang();
   return (
     <div className="brand-hero">
       <img alt="" className="brand-hero-mark" src={MARK_SRC} style={MARK_TRANSITION} />
       <img alt="Innovation City" className="brand-hero-wordmark" src={WORDMARK_SRC} style={WORDMARK_TRANSITION} />
-      <span className="brand-tagline">{TAGLINE}</span>
+      <span className="brand-tagline">{t(TAGLINE)}</span>
     </div>
   );
 }
@@ -40,6 +44,7 @@ export function BrandHero() {
  * `morphMark` is off while the logo countdown is showing -- its circle
  * owns the "ic-mark" name then, and names must be unique on the page.
  */
+// Brand pieces are client components only because they read the language.
 export function HeaderBrand({ morphMark = true }: { morphMark?: boolean }) {
   return (
     <div className="header-brand">
@@ -56,11 +61,14 @@ export function EyebrowMark() {
 
 /** Tagline line at the foot of the panel. */
 export function PanelBrand() {
+  const { t } = useLang();
   return (
     <>
       <p className="panel-footer">
         <img alt="" src={MARK_SRC} />
-        Innovation City · {TAGLINE}
+        {/* Two parts, each translated on its own -- so the slogan still turns
+            Arabic if its wording (TAGLINE above) is ever changed. */}
+        {t("Innovation City")} · {t(TAGLINE)}
       </p>
     </>
   );
@@ -75,6 +83,7 @@ export function PanelBrand() {
  * view-transition name "ic-mark" on the mark only).
  */
 export function LogoCountdown({ secondsLeft, seconds }: { secondsLeft: number; seconds: number }) {
+  const { lang, t } = useLang();
   return (
     <div className="logo-countdown" role="timer" aria-live="polite">
       <div className="lc-row">
@@ -108,7 +117,9 @@ export function LogoCountdown({ secondsLeft, seconds }: { secondsLeft: number; s
         </svg>
       </div>
       <p className="lc-label">
-        Returning to the start screen in <b>{secondsLeft}</b>
+        {t("Returning to the start screen in {n}", { n: "\u0000" }).split("\u0000")[0]}
+        <b>{localDigits(lang, secondsLeft)}</b>
+        {t("Returning to the start screen in {n}", { n: "\u0000" }).split("\u0000")[1]}
       </p>
     </div>
   );

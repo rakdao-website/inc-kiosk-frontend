@@ -1,6 +1,9 @@
+"use client";
+
 import { Check } from "lucide-react";
 import { MARK_SRC, WORDMARK_SRC } from "./Brand";
 import { PhotoImg } from "./RoomPhoto";
+import { useLang } from "./i18n";
 
 export type VisitorPassDetails = {
   /** "Booking confirmed" / "Registered for event" */
@@ -25,6 +28,7 @@ export type VisitorPassDetails = {
  * footer layout for later (see .pass-foot in globals.css).
  */
 export function VisitorPass({ pass }: { pass: VisitorPassDetails }) {
+  const { t } = useLang();
   return (
     <article className="visitor-pass" aria-label={`Visitor pass: ${pass.status}`}>
       <header className="pass-head">
@@ -32,7 +36,7 @@ export function VisitorPass({ pass }: { pass: VisitorPassDetails }) {
           <img alt="" className="pass-mark" src={MARK_SRC} />
           <img alt="Innovation City" className="pass-wordmark" src={WORDMARK_SRC} />
         </span>
-        <span className="pass-kind">Visitor pass</span>
+        <span className="pass-kind">{t("Visitor pass")}</span>
       </header>
 
       {pass.photo ? (
@@ -51,22 +55,22 @@ export function VisitorPass({ pass }: { pass: VisitorPassDetails }) {
 
       <dl className="pass-grid">
         <div>
-          <dt>Name</dt>
+          <dt>{t("Name")}</dt>
           <dd>{pass.name}</dd>
         </div>
         <div>
           <dt>{pass.placeLabel}</dt>
-          <dd>{pass.place}</dd>
+          <dd>{t(pass.place)}</dd>
         </div>
         <div>
-          <dt>Date</dt>
+          <dt>{t("Date")}</dt>
           <dd>{pass.date}</dd>
         </div>
         <div>
-          <dt>Time</dt>
+          <dt>{t("Time")}</dt>
           <dd>
             {pass.time}
-            {pass.timeDetail ? <small>{pass.timeDetail}</small> : null}
+            {pass.timeDetail ? <small>{t(pass.timeDetail)}</small> : null}
           </dd>
         </div>
       </dl>

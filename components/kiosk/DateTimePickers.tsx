@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronUp } from "lucide-react";
+import { formatClock, formatDay, localDigits, monthName, periodLabel, useLang } from "./i18n";
 
 /* -------------------------------------------------------------------------
    Touch-friendly date and time pickers for the kiosk.
@@ -42,9 +43,10 @@ function Column({
   disabled?: boolean;
   wide?: boolean;
 }) {
+  const { t } = useLang();
   return (
     <div className={wide ? "dt-col wide" : "dt-col"} role="group" aria-label={label}>
-      <span className="dt-col-label">{label}</span>
+      <span className="dt-col-label">{t(label)}</span>
       <button aria-label={`Next ${label.toLowerCase()}`} className="dt-step" disabled={disabled} onClick={onUp} type="button">
         <ChevronUp aria-hidden />
       </button>
@@ -112,29 +114,22 @@ export function DatePicker({
     if (d !== undefined) pick(y, m, d);
   }
 
-  const summary = current
-    ? new Date(Date.UTC(current.y, current.m - 1, current.d)).toLocaleDateString("en-GB", {
-        weekday: "long",
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-        timeZone: "UTC",
-      })
-    : "Choose a day";
+  const { lang, t } = useLang();
+  const summary = current ? formatDay(lang, current.date, "long") : t("Choose a day");
 
   const none = validDates.length === 0;
 
   return (
     <div className="dt-field">
       <div className="dt-head">
-        <span className="field-label">{label}</span>
-        <span className="dt-summary">{none ? "No dates available right now." : summary}</span>
+        <span className="field-label">{t(label)}</span>
+        <span className="dt-summary">{none ? t("No dates available right now.") : summary}</span>
       </div>
       <div className="dt-box">
         <div className="dt-columns">
-          <Column disabled={none} display={current ? String(current.d) : "--"} label="Day" onDown={() => stepDay(-1)} onUp={() => stepDay(1)} />
-          <Column disabled={none} display={current ? MONTHS[current.m - 1] : "--"} label="Month" onDown={() => stepMonth(-1)} onUp={() => stepMonth(1)} />
-          <Column disabled={none} display={current ? String(current.y) : "--"} label="Year" onDown={() => stepYear(-1)} onUp={() => stepYear(1)} wide />
+          <Column disabled={none} display={current ? localDigits(lang, current.d) : "--"} label="Day" onDown={() => stepDay(-1)} onUp={() => stepDay(1)} />
+          <Column disabled={none} display={current ? monthName(lang, current.m) : "--"} label="Month" onDown={() => stepMonth(-1)} onUp={() => stepMonth(1)} />
+          <Column disabled={none} display={current ? localDigits(lang, current.y) : "--"} label="Year" onDown={() => stepYear(-1)} onUp={() => stepYear(1)} wide />
         </div>
       </div>
     </div>
@@ -203,28 +198,29 @@ export function TimePicker({
 
   const none = validTimes.length === 0;
   const off = disabled || none;
+  const { lang, t } = useLang();
 
   return (
     <div className="dt-field">
       <div className="dt-head">
-        <span className="field-label">{label}</span>
+        <span className="field-label">{t(label)}</span>
         <span className="dt-summary">
           {disabled
-            ? "Choose a day first"
+            ? t("Choose a day first")
             : none
-              ? "No free times left on this day"
+              ? t("No free times left on this day")
               : current
-                ? `Starts at ${current.hour}:${String(current.minute).padStart(2, "0")} ${current.period}`
-                : "Use the arrows to set a start time"}
+                ? t("Starts at {time}", { time: formatClock(lang, current.value) })
+                : t("Use the arrows to set a start time")}
         </span>
       </div>
       <div className={off ? "dt-box off" : "dt-box"}>
-        <div className="dt-columns">
-          <Column disabled={off} display={current ? String(current.hour) : "--"} label="Hour" onDown={() => stepHour(-1)} onUp={() => stepHour(1)} />
+        <div className="dt-columns dt-ltr">
+          <Column disabled={off} display={current ? localDigits(lang, current.hour) : "--"} label="Hour" onDown={() => stepHour(-1)} onUp={() => stepHour(1)} />
           <span aria-hidden className="dt-colon">:</span>
           <Column
             disabled={off}
-            display={current ? String(current.minute).padStart(2, "0") : "--"}
+            display={current ? localDigits(lang, String(current.minute).padStart(2, "0")) : "--"}
             label="Minute"
             onDown={() => stepMinute(-1)}
             onUp={() => stepMinute(1)}
@@ -240,7 +236,7 @@ export function TimePicker({
                 role="radio"
                 type="button"
               >
-                {period}
+                {periodLabel(lang, period)}
               </button>
             ))}
           </div>

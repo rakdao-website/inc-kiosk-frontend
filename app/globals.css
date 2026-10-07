@@ -733,19 +733,36 @@ html[data-nav="back"]::view-transition-new(screen) {
   animation-delay: 0.06s;
 }
 
-/* Every version of the mark (welcome, header, countdown) is the same
-   shape, so instead of cross-fading between two half-transparent copies
-   (which looked dark mid-flight) the solid logo simply flies. */
+/* Every version of the logo (welcome, header, countdown) is the same
+   shape, so one solid picture flies instead of two half-transparent ones
+   cross-fading (which looked dark). The browser animates PICTURES of the
+   logo taken at its old and new size, so we always show the BIGGER one and
+   only ever shrink it -- enlarging the small header picture made it blurry.
+     - leaving the welcome screen (big -> small header): the old picture
+     - ticket / thank-you countdown and the return to welcome (small -> big):
+       the new picture -- html[data-logo="grow"], set by viewTransition.ts */
 ::view-transition-old(ic-mark),
 ::view-transition-old(ic-wordmark) {
   animation: none;
-  opacity: 0;
+  opacity: 1;
+  height: 100%;
 }
 
 ::view-transition-new(ic-mark),
 ::view-transition-new(ic-wordmark) {
   animation: none;
+  opacity: 0;
   height: 100%;
+}
+
+html[data-logo="grow"]::view-transition-old(ic-mark),
+html[data-logo="grow"]::view-transition-old(ic-wordmark) {
+  opacity: 0;
+}
+
+html[data-logo="grow"]::view-transition-new(ic-mark),
+html[data-logo="grow"]::view-transition-new(ic-wordmark) {
+  opacity: 1;
 }
 
 /* Ticket opening: the header logo flies down into the ticket's countdown
@@ -1415,7 +1432,7 @@ button.glass-card:disabled {
   flex-direction: column;
   gap: 28px;
   padding: 40px;
-  text-align: left;
+  text-align: start; /* right in Arabic, left in English */
 }
 
 .panel.compact {
@@ -1552,7 +1569,7 @@ button.glass-card:disabled {
   padding: 0 28px;
   font-size: 28px;
   font-weight: 500;
-  text-align: left;
+  text-align: start; /* right in Arabic, left in English */
   transition: border-color 0.16s ease;
 }
 
@@ -1638,7 +1655,7 @@ button.glass-card:disabled {
   padding: 0 22px;
   font-size: 26px;
   font-weight: 500;
-  text-align: left;
+  text-align: start; /* right in Arabic, left in English */
 }
 
 .kselect-option:active {
@@ -1955,7 +1972,7 @@ button.glass-card:disabled {
   font-size: 26px;
   font-weight: 500;
   line-height: 34px;
-  text-align: left;
+  text-align: start; /* right in Arabic, left in English */
 }
 
 .check-box {
@@ -2046,7 +2063,7 @@ button.glass-card:disabled {
   align-items: flex-start;
   gap: 8px;
   padding: 32px 40px;
-  text-align: left;
+  text-align: start; /* right in Arabic, left in English */
 }
 
 .event-card strong {
@@ -2078,7 +2095,7 @@ button.glass-card:disabled {
   gap: 8px;
   border-radius: 40px;
   padding: 32px;
-  text-align: left;
+  text-align: start; /* right in Arabic, left in English */
 }
 
 /* A last card alone on its row (odd count) is centred under the others. */
@@ -2681,7 +2698,7 @@ button.glass-card:disabled {
   flex-direction: column;
   overflow: hidden;
   padding: 0;
-  text-align: left;
+  text-align: start; /* right in Arabic, left in English */
 }
 
 .room-choice.selected {
@@ -3146,7 +3163,1273 @@ button.glass-card:disabled {
   }
 }
 
+
+/* ================================================================ language, reach mode, live rooms */
+
+/* ---- Language switch + reach mode (bottom of the panel, every screen) ---- */
+.kiosk-tools {
+  position: absolute;
+  right: 0;
+  bottom: 70px;
+  left: 0;
+  z-index: 6;
+  display: flex;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.kiosk-tools > * {
+  pointer-events: auto;
+}
+
+.lang-switch {
+  display: flex;
+  gap: 4px;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  border-radius: 100px;
+  background: rgba(3, 5, 12, 0.5);
+  padding: 5px;
+}
+
+.lang-switch button {
+  height: 50px;
+  border: 0;
+  border-radius: 100px;
+  background: transparent;
+  padding: 0 22px;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+.lang-switch button[lang="ar"] {
+  font-family: var(--font-arabic), sans-serif;
+  letter-spacing: 0;
+}
+
+.lang-switch button.on {
+  background: var(--sky);
+  color: var(--ink);
+  opacity: 1;
+}
+
+.reach-toggle {
+  display: inline-flex;
+  height: 60px;
+  align-items: center;
+  gap: 10px;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  border-radius: 100px;
+  background: rgba(3, 5, 12, 0.5);
+  padding: 0 22px 0 16px;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.reach-toggle svg {
+  width: 28px;
+  height: 28px;
+}
+
+.reach-toggle.on {
+  border-color: var(--sky);
+  background: var(--sky);
+  color: var(--ink);
+}
+
+/* ---- Reach mode: everything moves into the lower part of the screen ---- */
+.kiosk-frame.reach .screen {
+  justify-content: flex-end;
+  padding-bottom: 150px;
+}
+
+.kiosk-frame.reach .screen-body {
+  transform: scale(0.8);
+  transform-origin: 50% 100%;
+}
+
+/* ---- "Are you still there?" ---- */
+.idle-card {
+  display: flex;
+  width: 820px;
+  flex-direction: column;
+  align-items: center;
+  gap: 26px;
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-radius: 48px;
+  background: var(--dots), rgba(8, 14, 32, 0.96);
+  padding: 60px;
+  text-align: center;
+  animation: pass-in 0.45s cubic-bezier(0.22, 0.9, 0.24, 1) both;
+}
+
+.idle-card h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 52px;
+  font-weight: 400;
+  line-height: 1.25;
+}
+
+.idle-card p {
+  margin: 0;
+  font-size: 26px;
+  line-height: 36px;
+  opacity: 0.75;
+}
+
+.idle-ring {
+  position: relative;
+  width: 200px;
+  height: 200px;
+}
+
+.idle-ring svg {
+  position: absolute;
+  inset: 0;
+  transform: rotate(-90deg);
+}
+
+.idle-ring-track,
+.idle-ring-bar {
+  fill: none;
+  stroke-width: 10;
+}
+
+.idle-ring-track {
+  stroke: rgba(255, 255, 255, 0.1);
+}
+
+.idle-ring-bar {
+  stroke: var(--sky);
+  stroke-linecap: round;
+  stroke-dasharray: 553;
+  animation: idle-ring-drain linear forwards;
+}
+
+@keyframes idle-ring-drain {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 553;
+  }
+}
+
+.idle-ring b {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 72px;
+  font-weight: 400;
+}
+
+/* ---- Live room status on "Choose your room" ---- */
+.room-status {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 100px;
+  padding: 8px 18px;
+  font-size: 19px;
+  font-weight: 500;
+}
+
+.room-status i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.room-status.available {
+  border: 1px solid rgba(29, 214, 139, 0.45);
+  background: rgba(6, 40, 28, 0.8);
+  color: #8ff0c6;
+}
+
+.room-status.available i {
+  background: #1dd68b;
+  box-shadow: 0 0 10px #1dd68b;
+}
+
+.room-status.busy,
+.room-status.closed {
+  border: 1px solid rgba(255, 184, 77, 0.45);
+  background: rgba(48, 30, 6, 0.8);
+  color: #ffd18a;
+}
+
+.room-status.busy i,
+.room-status.closed i {
+  background: #ffb84d;
+}
+
+/* Status on the booking photo: top corner, beside the full-size button. */
+.room-photo-status .room-status {
+  top: 16px;
+  right: 76px;
+}
+
+.kiosk-frame[dir="rtl"] .room-photo-status .room-status {
+  right: auto;
+  left: 76px;
+}
+
+/* ---- Next free time (clash on the booking form) ---- */
+.slot-clash {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 2px solid rgba(255, 184, 77, 0.45);
+  border-radius: 28px;
+  background: rgba(255, 184, 77, 0.08);
+  padding: 18px 24px;
+}
+
+.slot-clash b {
+  color: #ffd18a;
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.slot-clash span {
+  font-size: 19px;
+  opacity: 0.75;
+}
+
+.slot-chips {
+  display: flex;
+  gap: 12px;
+}
+
+.slot-chips button {
+  height: 60px;
+  border: 2px solid rgba(111, 204, 221, 0.5);
+  border-radius: 100px;
+  background: rgba(111, 204, 221, 0.1);
+  padding: 0 26px;
+  color: #fff;
+  font-size: 21px;
+  font-weight: 500;
+}
+
+.slot-chips button.best {
+  border-color: var(--sky);
+  background: var(--sky);
+  color: var(--ink);
+}
+
+/* ---- Sky: "Try saying" ---- */
+.voice-try {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.voice-try small {
+  color: #86d0da;
+  font-size: 16px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.voice-try div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.voice-try span {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 100px;
+  background: rgba(255, 255, 255, 0.07);
+  padding: 8px 18px;
+  font-size: 19px;
+}
+
+/* ---- Right-to-left (Arabic) ---- */
+.kiosk-frame[dir="rtl"] {
+  --font-body: var(--font-arabic), var(--font-oxanium), Arial, sans-serif;
+  --font-display: var(--font-arabic), Arial, sans-serif;
+}
+
+/* Arabic letters join up: letter-spacing would break the words apart. */
+.kiosk-frame[dir="rtl"] * {
+  letter-spacing: 0 !important;
+}
+
+.kiosk-frame[dir="rtl"] .screen-title,
+.kiosk-frame[dir="rtl"] .hero-title,
+.kiosk-frame[dir="rtl"] .idle-card h2,
+.kiosk-frame[dir="rtl"] .qr-head h2,
+.kiosk-frame[dir="rtl"] .kyc-copy h2,
+.kiosk-frame[dir="rtl"] .pass-status {
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.kiosk-frame[dir="rtl"] .hero-title {
+  font-size: 68px;
+}
+
+.kiosk-frame[dir="rtl"] .back-btn {
+  right: 0;
+  left: auto;
+}
+
+.kiosk-frame[dir="rtl"] .back-circle svg {
+  transform: scaleX(-1); /* the arrow points the way back: right */
+}
+
+.kiosk-frame[dir="rtl"] .corner-tick {
+  right: auto;
+  left: 0;
+}
+
+.kiosk-frame[dir="rtl"] .corner-tick i {
+  clip-path: polygon(0 0, 100% 0, 0 100%);
+}
+
+.kiosk-frame[dir="rtl"] .room-photo-facts,
+.kiosk-frame[dir="rtl"] .room-status {
+  right: 16px;
+  left: auto;
+}
+
+.kiosk-frame[dir="rtl"] .room-status {
+  right: auto;
+  left: 18px;
+}
+
+.kiosk-frame[dir="rtl"] .room-photo-facts {
+  right: 16px;
+  left: auto;
+}
+
+.kiosk-frame[dir="rtl"] .kyc-cancel {
+  right: auto;
+  left: 56px;
+}
+
+/* The logo countdown and the time picker (hour : minute) keep their
+   left-to-right order; everything else follows right-to-left. */
+.lc-row,
+.dt-ltr {
+  direction: ltr;
+}
+
+/* The Innovation City logo never mirrors: the circle always sits to the
+   left of "INNOVATION CITY", in every language. */
+.header-brand,
+.pass-brand,
+.brand-hero {
+  direction: ltr;
+}
+
+/* Arabic: صباحاً / مساءً comes after the time when reading right-to-left,
+   i.e. on its left -- like "صباحاً ٩:٠٠" in text. */
+.kiosk-frame[dir="rtl"] .dt-ltr .dt-period {
+  order: -1;
+  margin-right: 16px;
+  margin-left: 0;
+}
+
+/* Phone numbers and emails keep their character order (they're typed in
+   Latin), but sit on the right like the rest of an Arabic form; the
+   country code moves to the right side automatically. */
+.kiosk-frame[dir="rtl"] .input-wrap input[dir="ltr"] {
+  text-align: right;
+}
+
+.kiosk-frame[dir="rtl"] .input-prefix {
+  border-right: 0;
+  border-left: 2px solid rgba(111, 204, 221, 0.3);
+  border-radius: 0 26px 26px 0;
+}
+
+.kiosk-frame[dir="rtl"] .kselect-compact .kselect-trigger {
+  border-radius: 0 26px 26px 0;
+}
+
+.kiosk-frame[dir="rtl"] .kselect-compact .kselect-list {
+  right: -2px;
+  left: auto;
+}
+
+/* Time ranges ("١:٠٠ مساءً – ١:٣٠ مساءً") read in order. */
+.kiosk-frame[dir="rtl"] .booking-summary-item b,
+.kiosk-frame[dir="rtl"] .pass-grid dd {
+  unicode-bidi: plaintext;
+}
+
+/* ================================================================ Explore (about Innovation City) */
+.about-wrap {
+  display: flex;
+  width: 968px;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.about-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-radius: 100px;
+  background: rgba(3, 5, 12, 0.5);
+  padding: 6px;
+}
+
+.about-tabs button {
+  height: 60px;
+  border: 0;
+  border-radius: 100px;
+  background: transparent;
+  color: #fff;
+  font-size: 19px;
+  font-weight: 500;
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.about-tabs button.on {
+  background: var(--sky);
+  color: var(--ink);
+  opacity: 1;
+}
+
+.about-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: card-in 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.about-lead {
+  margin: 0 0 2px;
+  font-size: 23px;
+  line-height: 32px;
+  text-align: center;
+  opacity: 0.7;
+}
+
+.about-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 0;
+  font-size: 21px;
+  font-weight: 500;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #86d0da;
+}
+
+.about-h svg {
+  width: 24px;
+  height: 24px;
+}
+
+.about-vision {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 2px solid rgba(134, 208, 218, 0.3);
+  border-radius: 34px;
+  background: linear-gradient(135deg, rgba(134, 208, 218, 0.16), rgba(138, 95, 168, 0.22));
+  padding: 28px 34px;
+}
+
+.about-vision small {
+  color: #86d0da;
+  font-size: 16px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+
+.about-vision p {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 31px;
+  line-height: 43px;
+}
+
+.about-vision.promo p {
+  font-size: 27px;
+  line-height: 38px;
+}
+
+.about-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.about-grid.two {
+  grid-template-columns: 1fr 1fr;
+}
+
+.about-grid.three {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.about-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  border-radius: 30px;
+  padding: 22px 24px;
+  text-align: start;
+}
+
+.about-card b {
+  font-size: 21px;
+  font-weight: 500;
+  line-height: 27px;
+}
+
+.about-card span {
+  font-size: 17px;
+  line-height: 24px;
+  opacity: 0.68;
+}
+
+.about-card.plain small {
+  color: #86d0da;
+  font-size: 15px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.about-card.plain span {
+  font-size: 19px;
+  line-height: 27px;
+  opacity: 0.85;
+}
+
+.about-icon {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  flex: none;
+  place-items: center;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(134, 208, 218, 0.25), rgba(138, 95, 168, 0.28));
+  color: #cfeff4;
+}
+
+.about-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.about-stat {
+  border: 1px solid rgba(111, 204, 221, 0.3);
+  border-radius: 28px;
+  background: rgba(111, 204, 221, 0.08);
+  padding: 22px 26px;
+}
+
+.about-stat b {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 54px;
+  font-weight: 400;
+  line-height: 1.1;
+}
+
+.about-stat em {
+  font-size: 30px;
+  font-style: normal;
+  opacity: 0.55;
+}
+
+.about-stat span {
+  font-size: 18px;
+  opacity: 0.75;
+}
+
+.about-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-radius: 30px;
+  padding: 20px 24px;
+}
+
+.about-list > div {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  font-size: 20px;
+  text-align: start;
+}
+
+.about-note {
+  margin: 0;
+  font-size: 17px;
+  line-height: 25px;
+  opacity: 0.6;
+}
+
+.about-row-card {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border-radius: 30px;
+  padding: 18px 24px;
+  font-size: 19px;
+  text-align: start;
+}
+
+.about-row-card span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  opacity: 0.85;
+}
+
+.about-row-card b {
+  font-size: 21px;
+  font-weight: 500;
+}
+
+.about-hours {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: 30px;
+  padding: 22px 28px;
+}
+
+.about-hours .about-h {
+  margin: 0 0 8px;
+}
+
+.about-hours-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 14px 0;
+  font-size: 20px;
+}
+
+.about-hours-row b {
+  font-weight: 500;
+  text-align: end;
+}
+
+.about-soon {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 30px;
+  padding: 14px 14px 22px;
+  text-align: start;
+}
+
+.about-soon-photo {
+  position: relative;
+  display: block;
+  height: 200px;
+  margin-bottom: 6px;
+  overflow: hidden;
+  border-radius: 22px;
+  background: #0b1222;
+}
+
+.about-soon b {
+  padding: 0 10px;
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.about-soon > span:last-child {
+  padding: 0 10px;
+  font-size: 17px;
+  line-height: 24px;
+  opacity: 0.68;
+}
+
+.about-cta {
+  margin-top: 4px;
+}
+
+.about-cta-arrow {
+  width: 26px;
+  height: 26px;
+}
+
+.kiosk-frame[dir="rtl"] .about-cta-arrow {
+  transform: scaleX(-1);
+}
+
+/* ================================================================ Explore (list of spaces) */
+.explore-list {
+  display: flex;
+  width: 968px;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.explore-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  border-radius: 34px;
+  padding: 12px 18px 12px 12px;
+}
+
+.explore-list > .explore-row {
+  animation: card-in 0.55s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+}
+
+.explore-list > .explore-row:nth-child(2) { animation-delay: 60ms; }
+.explore-list > .explore-row:nth-child(3) { animation-delay: 120ms; }
+.explore-list > .explore-row:nth-child(4) { animation-delay: 180ms; }
+.explore-list > .explore-row:nth-child(5) { animation-delay: 240ms; }
+.explore-list > .explore-row:nth-child(6) { animation-delay: 300ms; }
+
+/* Picture: the whole photo (never cropped) over a blurred copy, or an icon. */
+.explore-thumb {
+  position: relative;
+  display: grid;
+  width: 170px;
+  height: 112px;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(134, 208, 218, 0.28), transparent 60%),
+    radial-gradient(circle at 80% 80%, rgba(138, 95, 168, 0.3), transparent 60%),
+    #0b1430;
+}
+
+.explore-thumb .kiosk-icon {
+  width: 56px;
+  height: 56px;
+}
+
+.explore-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start; /* start of the line: left in English, right in Arabic */
+  gap: 5px;
+  text-align: start;
+}
+
+.explore-text b {
+  font-size: 25px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.explore-text > span:not(.explore-status) {
+  font-size: 18px;
+  line-height: 24px;
+  opacity: 0.7;
+}
+
+.explore-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.explore-status i {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+}
+
+.explore-status.available {
+  color: #8ff0c6;
+}
+
+.explore-status.available i {
+  background: #1dd68b;
+  box-shadow: 0 0 10px #1dd68b;
+}
+
+.explore-status.busy {
+  color: #ffd18a;
+}
+
+.explore-status.busy i {
+  background: #ffb84d;
+}
+
+.explore-status.info {
+  color: #cfeff4;
+}
+
+.explore-status.info i {
+  background: #6fccdd;
+}
+
+.explore-map {
+  display: grid;
+  width: 64px;
+  height: 64px;
+  flex: none;
+  place-items: center;
+  border: 2px solid rgba(111, 204, 221, 0.35);
+  border-radius: 50%;
+  background: rgba(111, 204, 221, 0.08);
+  color: #86d0da;
+}
+
+.explore-map svg {
+  width: 28px;
+  height: 28px;
+}
+
+.explore-act {
+  display: inline-flex;
+  height: 64px;
+  min-width: 150px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 100px;
+  background: var(--sky);
+  padding: 0 18px 0 24px;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.explore-act.ghost {
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.explore-chevron {
+  width: 22px;
+  height: 22px;
+}
+
+.kiosk-frame[dir="rtl"] .explore-chevron {
+  transform: scaleX(-1);
+}
+
+.kiosk-frame[dir="rtl"] .explore-row {
+  padding: 12px 12px 12px 18px;
+}
+
+/* ================================================================ floor map (Find a place) */
+/* Floor plan + animations ported from the live dashboard, sized for the
+   kiosk. Quick buttons above, details card below. */
+.floor-map-wrap {
+  display: flex;
+  width: 968px;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Search box + quick buttons share one row. */
+.floor-top {
+  position: relative;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.floor-search {
+  position: relative;
+  display: flex;
+  height: 64px;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  border-radius: 100px;
+  background: rgba(3, 5, 12, 0.6);
+  transition: border-color 0.16s ease;
+}
+
+.floor-search:focus-within {
+  border-color: var(--sky);
+}
+
+.floor-search-icon {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  margin-inline-start: 20px;
+  color: #86d0da;
+}
+
+.floor-search input {
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  padding: 0 14px;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 500;
+  outline: none;
+  user-select: text;
+}
+
+.floor-search input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.floor-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.floor-search-clear {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  place-items: center;
+  margin-inline-end: 10px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.floor-search-clear svg {
+  width: 22px;
+  height: 22px;
+}
+
+.floor-results {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  left: 0;
+  display: flex;
+  min-width: 420px;
+  flex-direction: column;
+  gap: 4px;
+  border: 2px solid rgba(111, 204, 221, 0.4);
+  border-radius: 28px;
+  background: var(--dots), rgba(8, 16, 34, 0.98);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  padding: 10px;
+  animation: kselect-in 0.16s ease-out;
+}
+
+.floor-results button {
+  display: flex;
+  min-height: 70px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  border: 0;
+  border-radius: 20px;
+  background: transparent;
+  padding: 8px 20px;
+  color: #fff;
+  text-align: start;
+}
+
+.floor-results button:active {
+  background: rgba(111, 204, 221, 0.16);
+}
+
+.floor-results b {
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.floor-results span {
+  font-size: 17px;
+  opacity: 0.6;
+}
+
+.floor-no-results {
+  margin: 0;
+  padding: 18px 20px;
+  font-size: 20px;
+  opacity: 0.6;
+}
+
+/* Quick buttons: one row; scrolls sideways if a label ever gets longer. */
+.floor-quick {
+  display: flex;
+  flex: none;
+  max-width: 560px;
+  justify-content: safe center;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.floor-quick::-webkit-scrollbar {
+  display: none;
+}
+
+.floor-quick button {
+  height: 60px;
+  flex: none;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  border-radius: 100px;
+  background: var(--dots), rgba(255, 255, 255, 0.05);
+  padding: 0 18px;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.floor-quick button.on {
+  border-color: var(--sky);
+  background: var(--sky);
+  color: var(--ink);
+}
+
+.floor-map {
+  overflow: hidden;
+  border: 2px solid rgba(111, 204, 221, 0.18);
+  border-radius: 36px;
+  background: rgba(3, 5, 12, 0.55);
+  box-shadow: inset 0 0 60px rgba(111, 204, 221, 0.06);
+}
+
+.floor-map svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.floor-map .room-hit {
+  cursor: pointer;
+}
+
+.floor-map .room-rect {
+  transition: fill 0.2s ease, stroke-opacity 0.2s ease;
+}
+
+.room-label {
+  font-family: var(--font-body);
+  pointer-events: none;
+}
+
+.yah-label {
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* details card under the map */
+.floor-sheet {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  border: 2px solid rgba(111, 204, 221, 0.35);
+  border-radius: 32px;
+  background: var(--dots), rgba(8, 14, 32, 0.9);
+  padding: 14px 22px 14px 14px;
+  animation: card-in 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.floor-sheet-photo {
+  position: relative;
+  display: block;
+  width: 190px;
+  height: 124px;
+  flex: none;
+  overflow: hidden;
+  border-radius: 22px;
+  background: #0b1222;
+}
+
+.floor-sheet-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.floor-sheet-text b {
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 32px;
+}
+
+.floor-sheet-sub {
+  font-size: 18px;
+  line-height: 24px;
+  opacity: 0.7;
+}
+
+.floor-sheet-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.room-status.inline {
+  position: static;
+}
+
+.floor-fact {
+  border: 1px solid rgba(111, 204, 221, 0.35);
+  border-radius: 100px;
+  background: rgba(111, 204, 221, 0.1);
+  padding: 6px 14px;
+  color: #cfeff4;
+  font-size: 16px;
+}
+
+.floor-sheet-actions .primary-btn {
+  width: auto;
+  height: 76px;
+  padding: 0 34px;
+  font-size: 20px;
+}
+
+.floor-sheet-actions .primary-btn svg {
+  width: 26px;
+  height: 26px;
+}
+
+.floor-route-note {
+  display: inline-flex;
+  max-width: 230px;
+  align-items: center;
+  gap: 10px;
+  color: #86d0da;
+  font-size: 18px;
+  line-height: 24px;
+}
+
+.floor-route-note svg {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.floor-hint {
+  margin: 0;
+  font-size: 21px;
+  text-align: center;
+  opacity: 0.6;
+}
+
+/* Dashboard animations (same names as in the dashboard's globals.css). */
+@keyframes yahPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@keyframes yahIconLive {
+  0%,
+  100% {
+    opacity: 0.82;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes yahWaveRing {
+  0% {
+    opacity: 0.6;
+    r: 8;
+  }
+  100% {
+    opacity: 0;
+    r: 42;
+  }
+}
+
+@keyframes eventScreenContent {
+  0%,
+  100% {
+    fill: #eafdff;
+  }
+  35% {
+    fill: #4dd9e8;
+  }
+  65% {
+    fill: #9be9f2;
+  }
+}
+
+@keyframes eventBeamContent {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.yah-pulse {
+  animation: yahPulse 2s ease-in-out infinite;
+}
+
+.yah-icon-live {
+  animation: yahIconLive 3.4s ease-in-out infinite;
+}
+
+.yah-wave-ring {
+  animation: yahWaveRing 3s ease-out infinite;
+}
+
+.event-screen-live {
+  animation: eventScreenContent 5s ease-in-out infinite;
+}
+
+.event-beam-live {
+  animation: eventBeamContent 7s ease-in-out infinite;
+}
+
+/* The map's animations pause while Sky is talking, like the background. */
+.kiosk-frame[data-voice="on"] .floor-map * {
+  animation-play-state: paused;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .yah-pulse,
+  .yah-icon-live,
+  .yah-wave-ring,
+  .event-screen-live,
+  .event-beam-live,
+  .idle-ring-bar,
+  .kiosk-frame.reach .screen-body,
   .aurora-blob,
   .card-grid > .glass-card,
   .match-row > .glass-card,

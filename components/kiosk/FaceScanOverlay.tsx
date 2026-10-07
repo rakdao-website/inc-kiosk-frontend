@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, X } from "lucide-react";
+import { useLang } from "./i18n";
 
 export type KycPhase = "starting" | "align" | "scanning" | "checking" | "found" | "not-found" | "error";
 
@@ -98,6 +99,7 @@ export function FaceScanOverlay({
     };
   }, []);
 
+  const { t } = useLang();
   const { title, sub } = (mode === "enroll" ? ENROLL_COPY : COPY)[phase];
   const showErrorActions = phase === "error" && Boolean(errorActions);
   const canCancel =
@@ -145,16 +147,16 @@ export function FaceScanOverlay({
       ) : null}
 
       <div className="kyc-copy">
-        <span className="kyc-step">{mode === "enroll" ? "Face registration" : "Face check-in"}</span>
-        <h2 key={title}>{title}</h2>
-        <p>{sub}</p>
+        <span className="kyc-step">{t(mode === "enroll" ? "Face registration" : "Face check-in")}</span>
+        <h2 key={title}>{t(title)}</h2>
+        <p>{t(sub)}</p>
         {showErrorActions ? <div className="kyc-actions">{errorActions}</div> : null}
       </div>
 
       {canCancel ? (
         <button className="kyc-cancel" onClick={onCancel} type="button">
           <X aria-hidden />
-          <span>{phase === "error" ? "Close" : "Cancel"}</span>
+          <span>{t(phase === "error" ? "Close" : "Cancel")}</span>
         </button>
       ) : null}
     </div>

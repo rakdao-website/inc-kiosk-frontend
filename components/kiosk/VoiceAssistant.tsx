@@ -5,6 +5,8 @@ import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC, tool, backgroundR
 import { z } from "zod";
 import { Mic, MicOff, PhoneOff } from "lucide-react";
 import type { SkyState } from "./SkyFace";
+import { ROOM_PHOTOS } from "./RoomPhoto";
+import { useLang, type Lang } from "./i18n";
 
 // With barge-in enabled, the mic stays live even while the assistant is
 // talking - which means its own voice bleeding back in (no headphones, or
@@ -25,14 +27,13 @@ const ROOM_MAP: Record<string, { service_type: string; zone_id: string }> = {
   tiktok_studio: { service_type: "tiktok_studio", zone_id: "TTS_1" },
 };
 
-// Next.js serves files under public/ at the root path WITHOUT a /public
-// prefix (unlike the original Vite tester's paths) -- these point at
-// public/images/{file} in inc-kiosk-frontend.
+// Same photo files as the booking screens (see ROOM_PHOTOS in RoomPhoto.tsx),
+// so Sky and the screens always show the same pictures.
 const ROOM_DISPLAY_INFO: Record<string, { label: string; imageUrl: string }> = {
-  meeting_room_1: { label: "Meeting Room 1", imageUrl: "/images/meeting_room_1.PNG" },
-  meeting_room_2: { label: "Meeting Room 2", imageUrl: "/images/meeting_room_2.PNG" },
-  podcast_studio: { label: "Podcast Studio", imageUrl: "/images/podcast_studio.PNG" },
-  tiktok_studio: { label: "TikTok Studio", imageUrl: "/images/tiktok_studio.PNG" },
+  meeting_room_1: { label: "Meeting Room 1", imageUrl: ROOM_PHOTOS.MR_1 },
+  meeting_room_2: { label: "Meeting Room 2", imageUrl: ROOM_PHOTOS.MR_2 },
+  podcast_studio: { label: "Podcast Studio", imageUrl: ROOM_PHOTOS.podcast_studio },
+  tiktok_studio: { label: "TikTok Studio", imageUrl: ROOM_PHOTOS.tiktok_studio },
 };
 
 type VoiceVisitor = {
@@ -82,6 +83,8 @@ type VoiceAssistantProps = {
   }) => void;
   /** Drives Sky in the bottom bar: off / connecting / idle / listening / speaking. */
   onSkyStateChange?: (state: SkyState) => void;
+  /** The kiosk's language; Sky speaks it from the next conversation. */
+  language?: Lang;
 };
 
 // Mirrors normalize_phone_() in converse.py - always normalize before
@@ -100,7 +103,20 @@ export function VoiceAssistant({
   onNeedFaceEnrollment,
   onFormFieldUpdate,
   onSkyStateChange,
+  language = "en",
 }: VoiceAssistantProps) {
+  const { t } = useLang();
+  const languageRef = useRef(language);
+  languageRef.current = language;
+  // "Try saying" tips: shown for the first few seconds of a conversation
+  // (or until the visitor speaks), then the caption shrinks back.
+  const [showTips, setShowTips] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    setShowTips(true);
+    const timer = window.setTimeout(() => setShowTips(false), 12_000);
+    return () => window.clearTimeout(timer);
+  }, [open]);
   const [status, setStatus] = useState("idle");
   const [connected, setConnected] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -567,7 +583,15 @@ Be warm and professional, but brief - always.
 
       const agent = new RealtimeAgent({
         name: "Innovation City Assistant",
-        instructions: buildInstructions(knowledgeBase, startingVisitor),
+        instructions:
+          buildInstructions(knowledgeBase, startingVisitor) +
+          (languageRef.current === "ar"
+            ? "\n\nLANGUAGE: The visitor chose Arabic on the kiosk. Greet them and speak only in clear, warm " +
+              "Modern Standard Arabic as used by UAE government and business services (natural, polite, not a " +
+              "literal translation). Say times and numbers the way people in the UAE say them in Arabic. Keep room " +
+              "and service names the visitor sees on screen recognisable. If the visitor switches to English, " +
+              "reply in English."
+            : ""),
         tools: buildTools(),
       });
 
@@ -877,20 +901,31 @@ Be warm and professional, but brief - always.
         <div className="voice-bubble-text">
           <span className="voice-status">
             {currentVisitor ? `${currentVisitor.visitor_name} · ` : ""}
-            {status}
+            {t(status)}
           </span>
           {lastLine ? (
             <p className={lastLine.kind === "user" ? "voice-line user" : "voice-line"}>{lastLine.text}</p>
+          ) : null}
+          {/* Until the visitor has said something, suggest what to say. */}
+          {showTips && !transcript.some((line) => line.kind === "user") ? (
+            <div className="voice-try">
+              <small>{t("Try saying")}</small>
+              <div>
+                <span>{t("“Book Meeting Room 1 at 3 PM”")}</span>
+                <span>{t("“What’s on today?”")}</span>
+                <span>{t("“Where is the prayer room?”")}</span>
+              </div>
+            </div>
           ) : null}
         </div>
         <div className="voice-bubble-actions">
           <button className="voice-action" onClick={handleToggleMute} type="button" aria-pressed={muted}>
             {muted ? <MicOff aria-hidden /> : <Mic aria-hidden />}
-            <span>{muted ? "Unmute" : "Mute"}</span>
+            <span>{t(muted ? "Unmute" : "Mute")}</span>
           </button>
           <button className="voice-action end" onClick={handleDisconnect} type="button">
             <PhoneOff aria-hidden />
-            <span>End</span>
+            <span>{t("End")}</span>
           </button>
         </div>
       </div>

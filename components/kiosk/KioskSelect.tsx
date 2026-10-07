@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
+import { localDigits, useLang } from "./i18n";
 
 export type KioskOption = { value: string; label: string; hint?: string };
 
@@ -37,6 +38,7 @@ export function KioskSelect({
   variant = "field",
   placement = "down",
 }: KioskSelectProps) {
+  const { lang, t } = useLang();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -75,7 +77,7 @@ export function KioskSelect({
     <div className={`kselect kselect-${variant}${open ? " open" : ""}`} ref={rootRef}>
       {label ? (
         <span className="field-label" id={`${id}-label`}>
-          {label}
+          {t(label)}
         </span>
       ) : null}
       <button
@@ -89,13 +91,13 @@ export function KioskSelect({
         type="button"
       >
         <span className={selected ? "kselect-value" : "kselect-value placeholder"} id={`${id}-value`}>
-          {selected ? (variant === "compact" ? selected.value : selected.label) : placeholder}
+          {selected ? (variant === "compact" ? <bdi dir="ltr">{localDigits(lang, selected.value)}</bdi> : t(selected.label)) : t(placeholder)}
         </span>
         <ChevronDown aria-hidden className="kselect-chevron" />
       </button>
       {open ? (
         <div className={placement === "up" ? "kselect-list up" : "kselect-list"} id={`${id}-list`} ref={listRef} role="listbox">
-          {options.length === 0 ? <p className="kselect-empty">{emptyMessage}</p> : null}
+          {options.length === 0 ? <p className="kselect-empty">{t(emptyMessage)}</p> : null}
           {options.map((option) => {
             const isSelected = option.value === value;
             return (
@@ -108,7 +110,7 @@ export function KioskSelect({
                 type="button"
               >
                 <span>
-                  {option.label}
+                  {t(option.label)}
                   {option.hint ? <small>{option.hint}</small> : null}
                 </span>
                 {isSelected ? <Check aria-hidden /> : null}

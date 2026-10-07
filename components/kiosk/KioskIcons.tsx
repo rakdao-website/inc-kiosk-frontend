@@ -45,6 +45,22 @@ export const MeetingRoomIcon = () => (
   </Icon>
 );
 
+/** Offices: a briefcase. */
+export const OfficeIcon = () => (
+  <Icon>
+    <rect x="3" y="7.5" width="18" height="12.5" rx="2.5" />
+    <path d="M9 7.5V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.5M3 13h18M10.5 13v1.6h3V13" />
+  </Icon>
+);
+
+/** Business center: a building with a door. */
+export const BusinessCenterIcon = () => (
+  <Icon>
+    <path d="M4 20.5V9.2L12 4l8 5.2v11.3M4 20.5h16" />
+    <path d="M9.5 20.5v-5h5v5M8 11h.01M12 11h.01M16 11h.01" />
+  </Icon>
+);
+
 export const ExploreIcon = () => (
   <Icon>
     <circle cx="12" cy="12" r="9" />

@@ -3111,6 +3111,60 @@ button.glass-card:disabled {
   opacity: 0.75;
 }
 
+/* Confirm / Cancel card shown before the voice assistant books, moves or cancels a booking. */
+.approval-card {
+  gap: 36px;
+  padding: 64px 56px 56px;
+}
+
+.approval-rows {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 8px 32px;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.approval-rows > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 0;
+}
+
+.approval-rows > div + div {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.approval-rows dt {
+  font-size: 24px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.approval-rows dd {
+  margin: 0;
+  font-size: 34px;
+  font-weight: 500;
+  text-align: right;
+}
+
+.approval-actions {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.approval-actions button {
+  width: 100%;
+}
+
 /* Countdown back to the start screen after a visit finishes. */
 .auto-return {
   display: flex;

@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC, tool, backgroundResult } from "@openai/agents/realtime";
 import { z } from "zod";
 import { Mic, MicOff, PhoneOff } from "lucide-react";
 import type { SkyState } from "./SkyFace";
+import { decideSpeechEnd, shouldArmInterrupt, shouldInterruptNow } from "@/lib/voice-turns";
+import { describeApproval, type ApprovalPrompt } from "@/lib/voice-approval";
 
 // With barge-in enabled, the mic stays live even while the assistant is
 // talking - which means its own voice bleeding back in (no headphones, or
@@ -14,6 +17,38 @@ import type { SkyState } from "./SkyFace";
 const MIN_REAL_SPEECH_MS = 400;
 
 const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+// Microphone / turn-taking tuning. Staff change these in the admin Settings (Voice agent);
+// the kiosk reads them from /api/kiosk/config at the start of every conversation and falls
+// back to these values if that call fails.
+type VoiceTuning = {
+  allow_interruptions: boolean;
+  /** How long the visitor must keep speaking over the assistant before it stops. */
+  interrupt_min_ms: number;
+  /** Speech detection threshold (higher = needs louder, closer speech). */
+  vad_threshold: number;
+  /** Silence needed before the assistant treats the visitor's turn as finished. */
+  silence_ms: number;
+  noise_reduction: "near_field" | "far_field" | "off";
+};
+
+const DEFAULT_VOICE_TUNING: VoiceTuning = {
+  allow_interruptions: true,
+  interrupt_min_ms: 700,
+  vad_threshold: 0.7,
+  silence_ms: 600,
+  noise_reduction: "near_field",
+};
+
+async function fetchVoiceTuning(): Promise<VoiceTuning> {
+  try {
+    const res = await fetch(`${BACKEND_BASE_URL}/api/kiosk/config`);
+    const body = await res.json();
+    return { ...DEFAULT_VOICE_TUNING, ...(body?.data?.voice ?? {}) };
+  } catch {
+    return DEFAULT_VOICE_TUNING;
+  }
+}
 
 // Known room -> (service_type, zone_id) mapping, matching the zones table and
 // kiosk_flow_services.py. TikTok has five rooms; every room except the two
@@ -139,6 +174,17 @@ export function VoiceAssistant({
   const conversationEndedRef = useRef(false);
   const turnAwaitingUserRef = useRef(true);
   const cancelledResponseIdsRef = useRef<Set<string>>(new Set());
+  // True while the assistant is mid-reply. Sound during that time must not cut it off or start
+  // a second reply unless it is real, sustained speech (see the speech_started handler).
+  const assistantSpeakingRef = useRef(false);
+  // True while the assistant's audio is still playing (a reply finishes generating a little
+  // before it finishes playing).
+  const audioPlayingRef = useRef(false);
+  const interruptTimerRef = useRef<number | null>(null);
+  // The on-screen "Confirm / Cancel" the visitor answers before the assistant changes a booking.
+  const [approval, setApproval] = useState<ApprovalPrompt | null>(null);
+  const approvalAnswerRef = useRef<((approved: boolean) => void) | null>(null);
+  const approvalTimeoutRef = useRef<number | null>(null);
   const speechStartedAtRef = useRef<number | null>(null);
   const lineIdRef = useRef(0);
   const onNeedFaceEnrollmentRef = useRef(onNeedFaceEnrollment);
@@ -180,6 +226,34 @@ export function VoiceAssistant({
   function updateCurrentVisitor(visitor: VoiceVisitor | null) {
     currentVisitorRef.current = visitor;
     setCurrentVisitor(visitor);
+  }
+
+  /** Show the confirmation and wait for the visitor. Unanswered for a minute counts as Cancel. */
+  function askApproval(prompt: ApprovalPrompt): Promise<boolean> {
+    return new Promise((resolve) => {
+      answerApproval(false); // never leave an earlier question hanging
+      approvalAnswerRef.current = resolve;
+      setApproval(prompt);
+      approvalTimeoutRef.current = window.setTimeout(() => answerApproval(false), 60_000);
+    });
+  }
+
+  function answerApproval(approved: boolean) {
+    if (approvalTimeoutRef.current !== null) {
+      window.clearTimeout(approvalTimeoutRef.current);
+      approvalTimeoutRef.current = null;
+    }
+    const resolve = approvalAnswerRef.current;
+    approvalAnswerRef.current = null;
+    setApproval(null);
+    resolve?.(approved);
+  }
+
+  function clearInterruptTimer() {
+    if (interruptTimerRef.current !== null) {
+      window.clearTimeout(interruptTimerRef.current);
+      interruptTimerRef.current = null;
+    }
   }
 
   function resumeAfterAssistantAudio() {
@@ -719,6 +793,9 @@ Be warm and professional, but brief - always.
     conversationEndedRef.current = false;
     turnAwaitingUserRef.current = true;
     cancelledResponseIdsRef.current.clear();
+    assistantSpeakingRef.current = false;
+    audioPlayingRef.current = false;
+    clearInterruptTimer();
     setTranscript([]);
 
     try {
@@ -739,6 +816,13 @@ Be warm and professional, but brief - always.
         tools: buildTools(),
       });
 
+      const tuning = await fetchVoiceTuning();
+      appendToolLog(
+        `voice tuning: threshold ${tuning.vad_threshold}, silence ${tuning.silence_ms}ms, ` +
+          `interruptions ${tuning.allow_interruptions ? `after ${tuning.interrupt_min_ms}ms of speech` : "off"}, ` +
+          `noise reduction ${tuning.noise_reduction}`,
+      );
+
       const session = new RealtimeSession(agent, {
         model: "gpt-realtime-2.1",
         transport: new OpenAIRealtimeWebRTC(),
@@ -754,7 +838,7 @@ Be warm and professional, but brief - always.
               // standing close to a kiosk mic (as opposed to "far_field",
               // meant for a mic across a room). If this causes a connection
               // error, it's the first thing to remove.
-              noiseReduction: { type: "near_field" },
+              noiseReduction: tuning.noise_reduction === "off" ? null : { type: tuning.noise_reduction },
               turnDetection: {
                 type: "server_vad",
                 // Raised back up from the 0.4 used while diagnosing a dead
@@ -763,7 +847,7 @@ Be warm and professional, but brief - always.
                 // which is exactly what filters out other people talking
                 // nearby. Retune if it's still too sensitive (try 0.7) or
                 // starts missing your own quieter speech (try 0.5).
-                threshold: 0.6,
+                threshold: tuning.vad_threshold,
                 prefixPaddingMs: 300,
                 // One more conservative step down from 500ms. Test with
                 // normal fluent sentences (not digit-by-digit numbers,
@@ -772,9 +856,11 @@ Be warm and professional, but brief - always.
                 // realistic expectations either way: a meaningful chunk of
                 // remaining delay is the model's own thinking + speech
                 // generation time, which no value here can remove.
-                silenceDurationMs: 400,
+                silenceDurationMs: tuning.silence_ms,
                 createResponse: false,
-                interruptResponse: true,
+                // Never let the server cut the assistant off on any sound. The kiosk decides
+                // below, and only interrupts after sustained speech (interrupt_min_ms).
+                interruptResponse: false,
               },
             },
             output: { format: "pcm16" },
@@ -836,32 +922,33 @@ Be warm and professional, but brief - always.
         resumeAfterAssistantAudio();
       });
 
-      // create_booking has needsApproval: true. window.confirm() is a
-      // quick way to gate this without building custom approval UI -
-      // swap for an in-app confirmation screen later if desired.
+      // create_booking, reschedule_booking and cancel_booking have needsApproval: true. The
+      // visitor answers on screen (a Confirm / Cancel card); nothing changes until they do.
       session.on("tool_approval_requested", (_context: unknown, _agent: unknown, request: any) => {
         const approvalItem = request?.approvalItem ?? request;
         const toolName = approvalItem?.rawItem?.name ?? approvalItem?.name ?? "this action";
         const args = approvalItem?.rawItem?.arguments ?? approvalItem?.arguments ?? {};
         appendToolLog(`approval requested for ${toolName}: ${JSON.stringify(args)}`);
 
-        if (toolName === "create_booking") {
-          try {
-            const parsedArgs = typeof args === "string" ? JSON.parse(args) : args;
-            if (parsedArgs?.room) showRoomPreview(parsedArgs.room);
-          } catch {
-            // Malformed args JSON - not fatal, approval still works without a preview.
-          }
+        let parsedArgs: any = args;
+        try {
+          parsedArgs = typeof args === "string" ? JSON.parse(args) : args;
+          if (toolName === "create_booking" && parsedArgs?.room) showRoomPreview(parsedArgs.room);
+        } catch {
+          // Malformed args JSON - not fatal, the confirmation still works without a preview.
         }
 
-        const approved = window.confirm(`Approve ${toolName}?\n\n${JSON.stringify(args, null, 2)}`);
-        if (approved) {
-          session.approve(approvalItem);
-          appendToolLog("approved");
-        } else {
-          session.reject(approvalItem);
-          appendToolLog("rejected");
-        }
+        askApproval(
+          describeApproval(toolName, parsedArgs, (roomKey) => ROOM_DISPLAY_INFO[roomKey]?.label ?? roomKey),
+        ).then((approved) => {
+          if (approved) {
+            session.approve(approvalItem);
+            appendToolLog("approved");
+          } else {
+            session.reject(approvalItem);
+            appendToolLog("rejected");
+          }
+        });
       });
 
       session.on("error", (err: unknown) => {
@@ -899,9 +986,19 @@ Be warm and professional, but brief - always.
             }
             return;
           }
+          assistantSpeakingRef.current = true;
           setStatus("assistant speaking…");
           setVoiceState("speaking");
+        } else if (event?.type === "output_audio_buffer.started") {
+          audioPlayingRef.current = true;
+          assistantSpeakingRef.current = true;
+        } else if (event?.type === "output_audio_buffer.stopped" || event?.type === "output_audio_buffer.cleared") {
+          audioPlayingRef.current = false;
+          assistantSpeakingRef.current = false;
+          clearInterruptTimer();
         } else if (event?.type === "response.done") {
+          if (!audioPlayingRef.current) assistantSpeakingRef.current = false;
+          clearInterruptTimer();
           // A response that called a tool (e.g. lookup_visitor) ends with
           // response.done the MOMENT the function call is emitted -- the
           // model hasn't actually spoken its reply yet, that comes in a
@@ -931,11 +1028,48 @@ Be warm and professional, but brief - always.
         } else if (event?.type === "input_audio_buffer.speech_started") {
           speechStartedAt = performance.now();
           speechStartedAtRef.current = speechStartedAt;
+          if (shouldArmInterrupt({ assistantSpeaking: assistantSpeakingRef.current, allowInterruptions: tuning.allow_interruptions })) {
+            // Don't stop on the first sound: only if the visitor keeps speaking.
+            clearInterruptTimer();
+            interruptTimerRef.current = window.setTimeout(() => {
+              interruptTimerRef.current = null;
+              if (
+                shouldInterruptNow({
+                  visitorStillSpeaking: speechStartedAtRef.current !== null,
+                  assistantSpeaking: assistantSpeakingRef.current,
+                })
+              ) {
+                appendToolLog(`visitor kept speaking for ${tuning.interrupt_min_ms}ms - interrupting the assistant`);
+                assistantSpeakingRef.current = false;
+                try {
+                  (session as any).interrupt();
+                } catch (err) {
+                  console.error("Could not interrupt the assistant:", err);
+                }
+              }
+            }, tuning.interrupt_min_ms);
+          }
         } else if (event?.type === "input_audio_buffer.speech_stopped") {
+          clearInterruptTimer();
           const startedAt = speechStartedAtRef.current;
           const durationMs = startedAt === null ? Infinity : performance.now() - startedAt;
           speechStartedAtRef.current = null;
-          if (durationMs < MIN_REAL_SPEECH_MS) {
+          const decision = decideSpeechEnd({
+            assistantSpeaking: assistantSpeakingRef.current,
+            durationMs,
+            minRealSpeechMs: MIN_REAL_SPEECH_MS,
+          });
+          if (decision === "ignore-while-assistant-talks") {
+            // Sound that ended while the assistant was still talking and was too short to
+            // interrupt it: noise, a cough, or its own voice coming back. Not a turn.
+            appendToolLog(
+              `ignoring ${durationMs === Infinity ? "?" : durationMs.toFixed(0)}ms of sound while the assistant was talking (${
+                tuning.allow_interruptions ? "shorter than the interrupt time" : "interruptions are off"
+              })`,
+            );
+            return;
+          }
+          if (decision === "ignore-blip") {
             appendToolLog(`ignoring ${durationMs.toFixed(0)}ms speech blip (below ${MIN_REAL_SPEECH_MS}ms) - likely echo/noise`);
             return;
           }
@@ -965,10 +1099,14 @@ Be warm and professional, but brief - always.
   }, [knownVisitor]);
 
   function performDisconnect() {
+    answerApproval(false);
     const session = sessionRef.current as any;
     session?.close?.() ?? session?.disconnect?.();
     sessionRef.current = null;
     cancelledResponseIdsRef.current.clear();
+    assistantSpeakingRef.current = false;
+    audioPlayingRef.current = false;
+    clearInterruptTimer();
     updateCurrentVisitor(null);
     conversationEndedRef.current = false;
     setRoomPreview(null);
@@ -1033,8 +1171,40 @@ Be warm and professional, but brief - always.
   // visitor can see they were heard. Tool-log lines stay in the console.
   const lastLine = [...transcript].reverse().find((line) => line.kind !== "tool");
 
+  const approvalModal = approval ? (
+    <div className="frame-modal approval-modal" role="dialog" aria-modal="true" aria-labelledby="approval-title">
+      <div
+        className="glass-card confirmation-card approval-card"
+        onKeyDown={(event) => event.key === "Escape" && answerApproval(false)}
+      >
+        <h2 id="approval-title">{approval.title}</h2>
+        {approval.rows.length > 0 ? (
+          <dl className="approval-rows">
+            {approval.rows.map((row) => (
+              <div key={row.label}>
+                <dt>{row.label}</dt>
+                <dd>{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        <div className="approval-actions">
+          <button className="outline-btn" onClick={() => answerApproval(false)} type="button">
+            {approval.cancelLabel}
+          </button>
+          <button autoFocus className="primary-btn" onClick={() => answerApproval(true)} type="button">
+            {approval.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+  // Drawn inside the kiosk frame (not inside the small voice bar) so it covers the whole screen.
+  const approvalHost = typeof document !== "undefined" ? document.querySelector(".kiosk-frame") : null;
+
   return (
     <div className="voice-dock" role="status" aria-live="polite">
+      {approvalModal ? (approvalHost ? createPortal(approvalModal, approvalHost) : approvalModal) : null}
       {roomPreview ? (
         <figure className="voice-room">
           <img key={roomPreview.imageUrl} alt={roomPreview.label} src={roomPreview.imageUrl} />

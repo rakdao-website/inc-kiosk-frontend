@@ -493,7 +493,8 @@ export function VoiceAssistant({
         }
         appendToolLog("list_my_bookings()");
         try {
-          const res = await fetch(`${BACKEND_BASE_URL}/api/kiosk/current-bookings?visitor_id=${visitor.visitor_id}`);
+          // upcoming-bookings covers every day from today on (current-bookings is today only).
+          const res = await fetch(`${BACKEND_BASE_URL}/api/kiosk/upcoming-bookings?visitor_id=${visitor.visitor_id}`);
           if (res.status === 404) return JSON.stringify({ bookings: [] });
           const body = await res.json().catch(() => ({}));
           if (res.ok && Array.isArray(body?.data)) {

@@ -235,6 +235,15 @@ function roomPhotoSrc(room: KioskRoom | undefined, service: ServiceType, zoneId:
   return room?.image_url ?? ROOM_PHOTOS[zoneId] ?? ROOM_PHOTOS[service] ?? ROOM_PHOTOS.MR_1;
 }
 
+// What tapping each "Explore the center" card does (see handleCenterOption).
+const CENTER_ACTION_HINTS: Record<string, string> = {
+  "Meeting Rooms": "Choose a room and book",
+  Offices: "Talk to our team",
+  "Podcast Studio": "Book the studio",
+  "TikTok Studio": "Choose a room and book",
+  "Business Center": "Talk to our team",
+};
+
 const initialBookingForm: BookingForm = {
   zoneId: "MR_1",
   date: todayIso(),
@@ -1022,6 +1031,18 @@ export default function KioskPage() {
     }
   }
 
+  /** "Explore the center": every card leads somewhere useful. */
+  function handleCenterOption(title: string) {
+    setError(null);
+    if (title === "Meeting Rooms") return void handleServiceSelect("meeting_room");
+    if (title === "Podcast Studio") return void handleServiceSelect("podcast_studio");
+    if (title === "TikTok Studio") return void handleServiceSelect("tiktok_studio");
+    // Offices and the Business Center are handled by the team: send it to the CX form.
+    setOtherReason(title === "Business Center" ? "free_zone_questions" : "start_company");
+    setOtherNotes(title === "Offices" ? "Interested in office space." : "");
+    setStep("other");
+  }
+
   async function handleServiceSelect(service: ServiceType) {
     setSelectedService(service);
     setError(null);
@@ -1652,10 +1673,16 @@ export default function KioskPage() {
               <p className="screen-copy">Ask Sky about any room on the floor, or browse below.</p>
               <div className="room-info-list">
                 {centerRoomOptions.map((option) => (
-                  <div className="glass-card room-info" key={option.title}>
+                  <button
+                    className="glass-card room-info"
+                    key={option.title}
+                    onClick={() => handleCenterOption(option.title)}
+                    type="button"
+                  >
                     <strong>{option.title}</strong>
                     <span>{option.description}</span>
-                  </div>
+                    <em className="room-info-hint">{CENTER_ACTION_HINTS[option.title] ?? "Ask Sky"}</em>
+                  </button>
                 ))}
               </div>
               {!voiceOpen ? (

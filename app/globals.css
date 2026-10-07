@@ -2081,6 +2081,24 @@ button.glass-card:disabled {
   text-align: left;
 }
 
+/* "Explore the center" cards are buttons: say what tapping them does. */
+.room-info {
+  cursor: pointer;
+}
+
+.room-info-hint {
+  margin-top: auto;
+  padding-top: 10px;
+  font-size: 0.8em;
+  font-style: normal;
+  letter-spacing: 0.04em;
+  color: rgba(111, 204, 221, 0.95);
+}
+
+.room-info-hint::after {
+  content: " \2192";
+}
+
 /* A last card alone on its row (odd count) is centred under the others. */
 .room-info:last-child:nth-child(odd) {
   grid-column: 1 / -1;

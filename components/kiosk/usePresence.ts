@@ -29,8 +29,10 @@ import { requestJson } from "@/lib/api";
    scan that follows can open it without a conflict.
    ------------------------------------------------------------------------- */
 
-/** Face width as a share of the frame that counts as "close". */
-const FACE_MIN_WIDTH = 0.15;
+/** Face width as a share of the frame that counts as "close".
+ *  Real kiosk scans show faces at about 13-22% of the frame width, so this must sit well
+ *  below that. Tests on a saved scan: recognition still works down to about 6%. */
+const FACE_MIN_WIDTH = 0.07;
 /** Share of the centre region that must change between checks (motion fallback). */
 const MOTION_RATIO = 0.10;
 /** Consecutive positive checks needed (at 250ms each). */

@@ -407,7 +407,8 @@ export default function KioskPage() {
       autoScanTriggeredRef.current = false;
       return;
     }
-    if (autoScanTriggeredRef.current || presence !== "engaged" || !greetingReady) {
+    // Start as soon as someone is in front of the camera; don't wait for the greeting to finish typing.
+    if (autoScanTriggeredRef.current || presence !== "engaged") {
       return;
     }
     // Give the page a beat to settle (camera preview above is also
@@ -423,7 +424,7 @@ export default function KioskPage() {
     }, 150);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, presence, greetingReady]);
+  }, [step, presence]);
 
   usePresence(step === "start" && presence === "idle", () => setPresence("engaged"));
 

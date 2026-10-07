@@ -108,6 +108,7 @@ type FaceProfileResult = {
 type CurrentBooking = {
   booking_id: number;
   booking_name: string;
+  booking_date: string;
   booking_time_start: string;
   booking_time_end: string;
   room_name: string;
@@ -364,6 +365,8 @@ export default function KioskPage() {
   const [currentBookings, setCurrentBookings] = useState<CurrentBooking[]>([]);
   const [selectedService, setSelectedService] = useState<ServiceType>("meeting_room");
   const [rooms, setRooms] = useState<KioskRoom[]>([]);
+  // Everything the visitor has booked from today on (currentBookings is today only).
+  const [upcomingBookings, setUpcomingBookings] = useState<CurrentBooking[]>([]);
   const [consentChecked, setConsentChecked] = useState(true);
   const [events, setEvents] = useState<KioskEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<KioskEvent | null>(null);
@@ -448,6 +451,7 @@ export default function KioskPage() {
     setVisitor(null);
     setVisitSession(null);
     setCurrentBookings([]);
+    setUpcomingBookings([]);
     setCaptureId(null);
     setFacecheckSuggestions(null);
     setScanState("idle");
@@ -486,6 +490,10 @@ export default function KioskPage() {
   }
 
   async function loadCurrentBookings(nextVisitor: Visitor) {
+    // Bookings for later days, for "your next booking". A failure here never blocks sign-in.
+    requestJson<CurrentBooking[]>(`/api/kiosk/upcoming-bookings?visitor_id=${nextVisitor.visitor_id}`)
+      .then(setUpcomingBookings)
+      .catch(() => setUpcomingBookings([]));
     try {
       const bookings = await requestJson<CurrentBooking[]>(
         `/api/kiosk/current-bookings?visitor_id=${nextVisitor.visitor_id}`,
@@ -689,15 +697,20 @@ export default function KioskPage() {
     if (kycMode === "enroll") setStep("facial-consent");
   }
 
-  function goHome() {
-    // Figma's "Click on Home" goes back to the "How would you like to
-    // continue?" screen, not the check-in screen. The visit (visitor,
-    // session, match suggestions) is kept; "Back to start" on the
+  async function goHome() {
+    // Signed in: Home is the welcome screen with their bookings (refreshed, since they
+    // may have just booked). Not signed in: back to "How would you like to continue?".
+    // The visit (visitor, session, match suggestions) is kept; "Back to start" on the
     // thank-you screen is still the full reset.
     setError(null);
     setConfirmation(null);
     setSelectedEvent(null);
     navigateBack();
+    if (visitor) {
+      await loadCurrentBookings(visitor).catch(() => undefined);
+      setStep("welcome-back");
+      return;
+    }
     setStep("identify");
   }
 
@@ -1267,6 +1280,9 @@ export default function KioskPage() {
     }
   }
 
+  // Bookings on later days (today's are in currentBookings).
+  const nextBookings = upcomingBookings.filter((booking) => booking.booking_date > todayIso());
+
   const bookingTitle =
     selectedService === "podcast_studio"
       ? "Book the Podcast Studio"
@@ -1580,12 +1596,33 @@ export default function KioskPage() {
                       ))}
                     </div>
                   </>
-                ) : (
+                ) : null}
+                {nextBookings.length > 0 ? (
                   <>
-                    <strong>No bookings today</strong>
+                    <div className="mini-heading">
+                      <CalendarDays />
+                      <div>
+                        <strong>{currentBookings.length > 0 ? "Coming up" : "Your next booking"}</strong>
+                        <span>{nextBookings.length > 1 ? `${nextBookings.length} upcoming bookings` : "1 upcoming booking"}</span>
+                      </div>
+                    </div>
+                    <div className="booking-summary-list">
+                      {nextBookings.slice(0, 3).map((booking) => (
+                        <div className="booking-summary-item" key={booking.booking_id}>
+                          <b>{formatBookingDay(booking.booking_date)} · {formatTime(booking.booking_time_start)} – {formatTime(booking.booking_time_end)}</b>
+                          <span>{booking.room_name}</span>
+                        </div>
+                      ))}
+                    </div>
+                    {nextBookings.length > 3 ? <p className="panel-copy">+ {nextBookings.length - 3} more</p> : null}
+                  </>
+                ) : null}
+                {currentBookings.length === 0 && nextBookings.length === 0 ? (
+                  <>
+                    <strong>No upcoming bookings</strong>
                     <p className="panel-copy">Talk to the assistant or pick a service to get started.</p>
                   </>
-                )}
+                ) : null}
               </Panel>
               <PrimaryButton onClick={() => setStep(currentBookings.length > 0 ? "thank-you" : "service-selection")}>
                 {currentBookings.length > 0 ? "Finish" : "See services"}
@@ -2449,6 +2486,13 @@ function BookingFormPanel({
       </PrimaryButton>
     </form>
   );
+}
+
+/** "Thu 8 Oct" for a booking day given as YYYY-MM-DD. */
+function formatBookingDay(value: string) {
+  const day = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(day.getTime())) return value;
+  return day.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 }
 
 function formatTime(value?: string) {

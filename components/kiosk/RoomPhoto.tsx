@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Maximize2, X } from "lucide-react";
 import { centerRoomOptions } from "@/lib/kiosk-content";
+import { localRoomPhoto, photoCandidates, ROOM_PHOTOS } from "@/lib/room-photos";
 
 /* -------------------------------------------------------------------------
    Room photo on the booking screens.
@@ -17,24 +18,7 @@ import { centerRoomOptions } from "@/lib/kiosk-content";
    leftover space, so photos of any shape look intentional.
    ------------------------------------------------------------------------- */
 
-export const ROOM_PHOTOS: Record<string, string> = {
-  MR_1: "/images/meeting_room_1.PNG",
-  MR_2: "/images/meeting_room_2.PNG",
-  podcast_studio: "/images/podcast_studio.PNG",
-  tiktok_studio: "/images/tiktok_studio.PNG",
-};
-
-/** Every location a photo might be in: both folders, both extension cases. */
-export function photoCandidates(src: string): string[] {
-  if (/^https?:\/\//i.test(src)) return [src]; // a remote photo (Spacebring): no local fallbacks
-  const file = src.split("/").pop() ?? src;
-  const base = file.replace(/\.png$/i, "");
-  const out: string[] = [];
-  for (const folder of ["/images/", "/brand/images/"]) {
-    for (const ext of [".PNG", ".png"]) out.push(`${folder}${base}${ext}`);
-  }
-  return [src, ...out.filter((candidate) => candidate !== src)];
-}
+export { ROOM_PHOTOS, localRoomPhoto, photoCandidates };
 
 // Remember which location worked, so every later image loads it first time.
 const resolved = new Map<string, string>();
@@ -42,10 +26,16 @@ const resolved = new Map<string, string>();
 /** <img> that tries each possible location until one loads. */
 export function PhotoImg({
   src,
+  fallbackSrc,
   onAllFailed,
   ...props
-}: Omit<React.ImgHTMLAttributes<HTMLImageElement>, "src" | "onError"> & { src: string; onAllFailed?: () => void }) {
-  const candidates = photoCandidates(src);
+}: Omit<React.ImgHTMLAttributes<HTMLImageElement>, "src" | "onError"> & {
+  src: string;
+  /** The built-in photo to show if `src` (a Spacebring photo) cannot be loaded. */
+  fallbackSrc?: string;
+  onAllFailed?: () => void;
+}) {
+  const candidates = photoCandidates(src, fallbackSrc);
   const [index, setIndex] = useState(() => Math.max(0, candidates.indexOf(resolved.get(src) ?? src)));
   const current = candidates[index];
   return (
@@ -113,6 +103,7 @@ type RoomOption = { value: string; label: string };
 
 export function RoomPhoto({
   src,
+  fallbackSrc,
   label,
   description,
   facts,
@@ -121,6 +112,8 @@ export function RoomPhoto({
   onChange,
 }: {
   src: string;
+  /** Built-in photo used if `src` cannot be loaded. */
+  fallbackSrc?: string;
   /** Short facts (capacity, equipment) shown as chips on the photo. */
   facts?: string[];
   /** Name shown on the photo (when there's no room choice). */
@@ -141,11 +134,12 @@ export function RoomPhoto({
     <figure className="room-photo">
       {!failed[src] ? (
         <>
-          <PhotoImg alt="" aria-hidden className="room-photo-fill" key={`fill-${src}`} src={src} />
+          <PhotoImg alt="" aria-hidden className="room-photo-fill" fallbackSrc={fallbackSrc} key={`fill-${src}`} src={src} />
           <PhotoImg
             alt={label}
             className="room-photo-img"
             decoding="async"
+            fallbackSrc={fallbackSrc}
             key={src}
             onAllFailed={() => setFailed((current) => ({ ...current, [src]: true }))}
             src={src}
@@ -216,6 +210,7 @@ export function preloadRoomPhotos() {
 /** Big photo card on the "Choose your room" screen. The whole photo shows. */
 export function RoomChoiceCard({
   src,
+  fallbackSrc,
   label,
   description,
   facts,
@@ -223,6 +218,8 @@ export function RoomChoiceCard({
   onChoose,
 }: {
   src: string;
+  /** Built-in photo used if `src` cannot be loaded. */
+  fallbackSrc?: string;
   label: string;
   description?: string | null;
   facts?: string[];
@@ -235,8 +232,8 @@ export function RoomChoiceCard({
       <span className="room-choice-photo">
         {!failed ? (
           <>
-            <PhotoImg alt="" aria-hidden className="room-photo-fill" src={src} />
-            <PhotoImg alt={label} className="room-photo-img" decoding="async" onAllFailed={() => setFailed(true)} src={src} />
+            <PhotoImg alt="" aria-hidden className="room-photo-fill" fallbackSrc={fallbackSrc} src={src} />
+            <PhotoImg alt={label} className="room-photo-img" decoding="async" fallbackSrc={fallbackSrc} onAllFailed={() => setFailed(true)} src={src} />
           </>
         ) : (
           <span className="room-photo-missing">{label}</span>

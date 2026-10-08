@@ -18,6 +18,7 @@ import { SkyFace, type SkyState } from "@/components/kiosk/SkyFace";
 import { KioskSelect, type KioskOption } from "@/components/kiosk/KioskSelect";
 import { DatePicker, TimePicker } from "@/components/kiosk/DateTimePickers";
 import { PhotoImg, preloadRoomPhotos, roomDescription, ROOM_FACTS, ROOM_PHOTOS, RoomChoiceCard, RoomPhoto } from "@/components/kiosk/RoomPhoto";
+import { localRoomPhoto } from "@/lib/room-photos";
 import { BrandHero, EyebrowMark, HeaderBrand, LogoCountdown, PanelBrand } from "@/components/kiosk/Brand";
 import { Typewriter } from "@/components/kiosk/Typewriter";
 import { VisitorPass, type VisitorPassDetails } from "@/components/kiosk/VisitorPass";
@@ -236,7 +237,7 @@ function roomsForService(rooms: KioskRoom[], service: ServiceType): KioskRoom[] 
 
 /** Photo for a room: its Spacebring cover photo, else our bundled photo. */
 function roomPhotoSrc(room: KioskRoom | undefined, service: ServiceType, zoneId: string): string {
-  return room?.image_url ?? ROOM_PHOTOS[zoneId] ?? ROOM_PHOTOS[service] ?? ROOM_PHOTOS.MR_1;
+  return room?.image_url ?? localRoomPhoto(zoneId, service);
 }
 
 // What tapping each "Explore the center" card does (see handleCenterOption).
@@ -1665,6 +1666,7 @@ export default function KioskPage() {
                       setStep(selectedService === "tiktok_studio" ? "booking-tiktok" : "booking");
                     }}
                     selected={bookingForm.zoneId === room.zone_id}
+                    fallbackSrc={localRoomPhoto(room.zone_id, selectedService)}
                     src={roomPhotoSrc(room, selectedService, room.zone_id)}
                   />
                 ))}
@@ -2477,6 +2479,7 @@ function BookingFormPanel({
         facts={photoFacts}
         label={photo.label}
         onChange={hasRoomChoice ? (zoneId) => onChange({ ...bookingForm, zoneId }) : undefined}
+        fallbackSrc={localRoomPhoto(chosenRoom?.zone_id ?? bookingForm.zoneId, service)}
         options={hasRoomChoice ? rooms.map((room) => ({ value: room.zone_id, label: room.room_name })) : undefined}
         src={photo.src}
         value={bookingForm.zoneId}

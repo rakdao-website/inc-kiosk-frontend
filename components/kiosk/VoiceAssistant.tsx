@@ -74,11 +74,10 @@ const ROOM_DISPLAY_INFO: Record<string, { label: string; imageUrl: string }> = {
   meeting_room_2: { label: "Meeting Room 2", imageUrl: "/images/meeting_room_2.PNG" },
   podcast_studio: { label: "Podcast Studio", imageUrl: "/images/podcast_studio.PNG" },
   tiktok_studio: { label: "TikTok Main Studio", imageUrl: "/images/tiktok_studio.PNG" },
-  // No dedicated photos yet for the other TikTok rooms - reuse the studio photo.
-  tiktok_beauty_room: { label: "TikTok Beauty Room", imageUrl: "/images/tiktok_studio.PNG" },
-  tiktok_music_room: { label: "TikTok Music Room", imageUrl: "/images/tiktok_studio.PNG" },
-  tiktok_battle_room_1: { label: "TikTok Battle Room 1", imageUrl: "/images/tiktok_studio.PNG" },
-  tiktok_battle_room_2: { label: "TikTok Battle Room 2", imageUrl: "/images/tiktok_studio.PNG" },
+  tiktok_beauty_room: { label: "TikTok Beauty Room", imageUrl: "/images/tiktok_beauty_room.jpg" },
+  tiktok_music_room: { label: "TikTok Music Room", imageUrl: "/images/tiktok_music_room.jpg" },
+  tiktok_battle_room_1: { label: "TikTok Battle Room 1", imageUrl: "/images/tiktok_battle_room_1.jpg" },
+  tiktok_battle_room_2: { label: "TikTok Battle Room 2", imageUrl: "/images/tiktok_battle_room_2.jpg" },
 };
 
 /** Spoken-friendly reason for a failed booking-system call. */
@@ -162,7 +161,7 @@ export function VoiceAssistant({
   const [voiceState, setVoiceState] = useState<"idle" | "listening" | "speaking">("idle");
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [currentVisitor, setCurrentVisitor] = useState<VoiceVisitor | null>(knownVisitor ?? null);
-  const [roomPreview, setRoomPreview] = useState<{ label: string; imageUrl: string } | null>(null);
+  const [roomPreview, setRoomPreview] = useState<{ label: string; imageUrl: string; fallbackUrl?: string } | null>(null);
 
   // Mutable refs mirror the original module-level `let` variables --
   // needed because event/tool callbacks close over these and must always
@@ -320,7 +319,11 @@ export function VoiceAssistant({
     // ...then the room's own photo from Spacebring, if it has one.
     loadRoomImages().then((images) => {
       const remote = images[zoneId];
-      if (remote) setRoomPreview((current) => (current && current.label === info.label ? { ...info, imageUrl: remote } : current));
+      if (remote) {
+        setRoomPreview((current) =>
+          current && current.label === info.label ? { ...info, imageUrl: remote, fallbackUrl: info.imageUrl } : current,
+        );
+      }
     });
   }
 
@@ -1231,7 +1234,16 @@ Be warm and professional, but brief - always.
       {approvalModal ? (approvalHost ? createPortal(approvalModal, approvalHost) : approvalModal) : null}
       {roomPreview ? (
         <figure className="voice-room">
-          <img key={roomPreview.imageUrl} alt={roomPreview.label} src={roomPreview.imageUrl} />
+          <img
+            key={roomPreview.imageUrl}
+            alt={roomPreview.label}
+            // If the Spacebring photo cannot be loaded, show the built-in copy.
+            onError={() => {
+              const fallback = roomPreview.fallbackUrl;
+              if (fallback) setRoomPreview({ label: roomPreview.label, imageUrl: fallback });
+            }}
+            src={roomPreview.imageUrl}
+          />
           <figcaption>{roomPreview.label}</figcaption>
         </figure>
       ) : null}

@@ -49,6 +49,8 @@ button {
 .kiosk-stage {
   position: fixed;
   inset: 0;
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   background: #000;
 }
@@ -59,12 +61,12 @@ button {
   top: 50%;
   display: flex;
   width: 1080px;
-  height: 1920px;
+  height: var(--kiosk-h, 1920px);
   flex-direction: column;
   overflow: hidden;
-  /* --kiosk-scale is set by the inline script in layout.tsx before the
+  /* --kiosk-sx/--kiosk-sy are set by the inline script in layout.tsx before the
      first paint (and on every resize), so there's no size jump on load. */
-  transform: translate(-50%, -50%) scale(var(--kiosk-scale, 1));
+  transform: translate(-50%, -50%) scale(var(--kiosk-sx, 1), var(--kiosk-sy, 1));
   transform-origin: center;
   background: #000;
   color: var(--white);
@@ -279,8 +281,8 @@ button {
 .kiosk-panel {
   position: relative;
   z-index: 3;
-  height: 1466px;
-  flex: none;
+  min-height: 1466px;
+  flex: 1 1 auto;
   margin: 0 56px;
   border-top: 1px solid var(--sky);
   background: linear-gradient(180deg, rgba(111, 204, 221, 0.08) 0%, rgba(111, 204, 221, 0) 31.03%);

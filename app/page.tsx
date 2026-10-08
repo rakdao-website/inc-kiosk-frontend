@@ -203,7 +203,10 @@ const FACE_ENROLLMENT_SAMPLE_COUNT = 3;
 // (read from /api/kiosk/config when the screen loads).
 type ScanConfig = { durationMs: number; recognitionPhotos: number; enrolmentPhotos: number };
 const DEFAULT_SCAN_CONFIG: ScanConfig = { durationMs: KYC_SCAN_MS, recognitionPhotos: FACE_ENROLLMENT_SAMPLE_COUNT, enrolmentPhotos: FACE_ENROLLMENT_SAMPLE_COUNT };
-type KioskConfig = { face_scan: { duration_ms: number; recognition_photos: number; enrolment_photos: number } };
+type KioskConfig = {
+  face_scan: { duration_ms: number; recognition_photos: number; enrolment_photos: number };
+  display?: { stretch_to_screen: boolean };
+};
 const FACE_CAPTURE_WIDTH = 360;
 const FACE_CAPTURE_HEIGHT = 270;
 const FACE_CAPTURE_QUALITY = 0.76;
@@ -396,21 +399,35 @@ export default function KioskPage() {
   // Face-scan settings from the admin panel. If the call fails the defaults above stay.
   useEffect(() => {
     requestJson<KioskConfig>("/api/kiosk/config")
-      .then((config) =>
+      .then((config) => {
         setScanConfig({
           durationMs: config.face_scan.duration_ms,
           recognitionPhotos: config.face_scan.recognition_photos,
           enrolmentPhotos: config.face_scan.enrolment_photos,
-        }),
-      )
+        });
+        // "Stretch to fill the screen": cached so the next load fits before first paint
+        // (layout.tsx reads it), and the resize event refits the page right now.
+        if (config.display) {
+          try {
+            window.localStorage.setItem("kiosk.stretch", config.display.stretch_to_screen ? "1" : "0");
+          } catch {
+            /* storage blocked: the page keeps its current fit */
+          }
+          window.dispatchEvent(new Event("resize"));
+        }
+      })
       .catch(() => undefined);
   }, []);
 
+  // Rooms (and their photos in Spacebring) come from the backend. Loaded when the page opens and
+  // again each time a visitor reaches the services screen, so a kiosk that stays open all day
+  // does not go stale.
+  const atServices = step === "service-selection";
   useEffect(() => {
     requestJson<KioskRoom[]>("/api/kiosk/rooms")
       .then(setRooms)
-      .catch(() => setRooms([]));
-  }, []);
+      .catch(() => undefined); // keep the last good list
+  }, [atServices]);
 
   useEffect(() => {
     if (step !== "start") {

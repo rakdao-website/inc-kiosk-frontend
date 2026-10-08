@@ -6,7 +6,7 @@ import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC, tool, backgroundR
 import { z } from "zod";
 import { Mic, MicOff, PhoneOff } from "lucide-react";
 import type { SkyState } from "./SkyFace";
-import { decideSpeechEnd, shouldArmInterrupt, shouldInterruptNow } from "@/lib/voice-turns";
+import { BACKGROUND_TOOLS, decideSpeechEnd, shouldArmInterrupt, shouldInterruptNow, toolHandOff } from "@/lib/voice-turns";
 import { describeApproval, type ApprovalPrompt } from "@/lib/voice-approval";
 
 // With barge-in enabled, the mic stays live even while the assistant is
@@ -30,6 +30,8 @@ type VoiceTuning = {
   /** Silence needed before the assistant treats the visitor's turn as finished. */
   silence_ms: number;
   noise_reduction: "near_field" | "far_field" | "off";
+  /** The OpenAI voice model chosen in the admin Settings. */
+  model: string;
 };
 
 const DEFAULT_VOICE_TUNING: VoiceTuning = {
@@ -38,6 +40,7 @@ const DEFAULT_VOICE_TUNING: VoiceTuning = {
   vad_threshold: 0.7,
   silence_ms: 600,
   noise_reduction: "near_field",
+  model: "gpt-realtime-2.1",
 };
 
 async function fetchVoiceTuning(): Promise<VoiceTuning> {
@@ -181,6 +184,9 @@ export function VoiceAssistant({
   const audioPlayingRef = useRef(false);
   const interruptTimerRef = useRef<number | null>(null);
   const roomImagesRef = useRef<Record<string, string> | null>(null);
+  // True from the moment the assistant calls a tool until it speaks the result.
+  const awaitingToolFollowUpRef = useRef(false);
+  const toolFollowUpTimerRef = useRef<number | null>(null);
   // The on-screen "Confirm / Cancel" the visitor answers before the assistant changes a booking.
   const [approval, setApproval] = useState<ApprovalPrompt | null>(null);
   const approvalAnswerRef = useRef<((approved: boolean) => void) | null>(null);
@@ -247,6 +253,13 @@ export function VoiceAssistant({
     approvalAnswerRef.current = null;
     setApproval(null);
     resolve?.(approved);
+  }
+
+  function clearToolFollowUpTimer() {
+    if (toolFollowUpTimerRef.current !== null) {
+      window.clearTimeout(toolFollowUpTimerRef.current);
+      toolFollowUpTimerRef.current = null;
+    }
   }
 
   function clearInterruptTimer() {
@@ -820,6 +833,8 @@ Be warm and professional, but brief - always.
     turnAwaitingUserRef.current = true;
     cancelledResponseIdsRef.current.clear();
     roomImagesRef.current = null; // fetch the rooms' photos afresh for each conversation
+    awaitingToolFollowUpRef.current = false;
+    clearToolFollowUpTimer();
     assistantSpeakingRef.current = false;
     audioPlayingRef.current = false;
     clearInterruptTimer();
@@ -851,7 +866,7 @@ Be warm and professional, but brief - always.
       );
 
       const session = new RealtimeSession(agent, {
-        model: "gpt-realtime-2.1",
+        model: tuning.model,
         transport: new OpenAIRealtimeWebRTC(),
         config: {
           outputModalities: ["audio"],
@@ -978,6 +993,29 @@ Be warm and professional, but brief - always.
         });
       });
 
+      // A tool needing a spoken result has started or finished. If the model does not follow up
+      // on its own within a few seconds of the result being ready, ask it to, so the visitor is
+      // never left in silence after a booking or an availability check.
+      session.on("agent_tool_start", (_context: unknown, _agent: unknown, toolDef: any) => {
+        if (!BACKGROUND_TOOLS.has(toolDef?.name ?? "")) awaitingToolFollowUpRef.current = true;
+      });
+      session.on("agent_tool_end", (_context: unknown, _agent: unknown, toolDef: any) => {
+        if (BACKGROUND_TOOLS.has(toolDef?.name ?? "") || !awaitingToolFollowUpRef.current) return;
+        clearToolFollowUpTimer();
+        toolFollowUpTimerRef.current = window.setTimeout(() => {
+          toolFollowUpTimerRef.current = null;
+          if (!awaitingToolFollowUpRef.current) return; // it did follow up
+          awaitingToolFollowUpRef.current = false;
+          turnAwaitingUserRef.current = false;
+          appendToolLog("no reply after the tool result - asking the assistant to respond");
+          try {
+            (session.transport as any).sendEvent({ type: "response.create" });
+          } catch (err) {
+            console.error("Could not ask for the tool result reply:", err);
+          }
+        }, 3500);
+      });
+
       session.on("error", (err: unknown) => {
         console.error("Realtime session error:", err);
         setStatus("error - check browser console");
@@ -1003,7 +1041,13 @@ Be warm and professional, but brief - always.
         if (event?.type === "response.created") {
           const responseId = event?.response?.id;
           appendToolLog(`response.created (id=${responseId}), turnAwaitingUser=${turnAwaitingUserRef.current}`);
-          if (turnAwaitingUserRef.current) {
+          if (awaitingToolFollowUpRef.current) {
+            // The assistant is speaking the result of a tool it just called: always allowed.
+            awaitingToolFollowUpRef.current = false;
+            clearToolFollowUpTimer();
+            turnAwaitingUserRef.current = false;
+            appendToolLog(`speaking the tool result (response ${responseId})`);
+          } else if (turnAwaitingUserRef.current) {
             appendToolLog(`unrequested response ${responseId} detected before the visitor's turn - cancelling it`);
             cancelledResponseIdsRef.current.add(responseId);
             try {
@@ -1045,10 +1089,11 @@ Be warm and professional, but brief - always.
             .filter(Boolean)
             .join(" | ");
           appendToolLog(`response.done (id=${event?.response?.id}), status=${event?.response?.status}, output types=[${itemTypes}], transcript="${transcripts || "(none)"}"`);
-          const wasToolCallOnly =
-            outputItems.length > 0 && outputItems.every((item: any) => item?.type === "function_call");
-          if (wasToolCallOnly) {
-            appendToolLog("-> treated as tool-call dispatch, waiting for follow-up response");
+          // Any tool call that needs its result spoken (even if the assistant also said something
+          // first) means a second reply is coming: wait for it instead of handing the turn over.
+          if (toolHandOff(outputItems) === "wait-for-tool-result") {
+            awaitingToolFollowUpRef.current = true;
+            appendToolLog("-> tool call in this reply, waiting to speak its result");
           } else {
             resumeAfterAssistantAudio();
           }
@@ -1134,6 +1179,8 @@ Be warm and professional, but brief - always.
     assistantSpeakingRef.current = false;
     audioPlayingRef.current = false;
     clearInterruptTimer();
+    awaitingToolFollowUpRef.current = false;
+    clearToolFollowUpTimer();
     updateCurrentVisitor(null);
     conversationEndedRef.current = false;
     setRoomPreview(null);

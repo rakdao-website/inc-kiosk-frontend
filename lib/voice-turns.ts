@@ -30,3 +30,20 @@ export function shouldArmInterrupt(input: { assistantSpeaking: boolean; allowInt
 export function shouldInterruptNow(input: { visitorStillSpeaking: boolean; assistantSpeaking: boolean }): boolean {
   return input.visitorStillSpeaking && input.assistantSpeaking;
 }
+
+/* Tool calls. The assistant often says something ("Let me check that") and calls a tool in the
+   same reply. Once the tool has run, the assistant makes a SECOND reply with the result. That
+   second reply must not be cancelled as "unrequested", or the visitor hears nothing until they
+   speak again. */
+
+/** Tools whose result does not start a follow-up reply (the app returns them as background results). */
+export const BACKGROUND_TOOLS: ReadonlySet<string> = new Set(["preview_room", "end_conversation"]);
+
+export type ToolHandOff = "wait-for-tool-result" | "visitor-turn";
+
+/** After a reply finishes: is the assistant about to speak again with a tool's result, or is it
+ *  the visitor's turn? Any non-background tool call anywhere in the reply means "wait". */
+export function toolHandOff(outputItems: ReadonlyArray<{ type?: string; name?: string }>): ToolHandOff {
+  const waitsForResult = outputItems.some((item) => item?.type === "function_call" && !BACKGROUND_TOOLS.has(item.name ?? ""));
+  return waitsForResult ? "wait-for-tool-result" : "visitor-turn";
+}

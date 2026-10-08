@@ -181,6 +181,7 @@ export function VoiceAssistant({
   // before it finishes playing).
   const audioPlayingRef = useRef(false);
   const interruptTimerRef = useRef<number | null>(null);
+  const roomImagesRef = useRef<Record<string, string> | null>(null);
   // The on-screen "Confirm / Cancel" the visitor answers before the assistant changes a booking.
   const [approval, setApproval] = useState<ApprovalPrompt | null>(null);
   const approvalAnswerRef = useRef<((approved: boolean) => void) | null>(null);
@@ -295,10 +296,32 @@ export function VoiceAssistant({
     }
   }
 
+  /** Each room's own photo from Spacebring, by zone id, from /api/kiosk/rooms. */
+  async function loadRoomImages(): Promise<Record<string, string>> {
+    if (roomImagesRef.current) return roomImagesRef.current;
+    try {
+      const res = await fetch(`${BACKEND_BASE_URL}/api/kiosk/rooms`);
+      const body = await res.json();
+      const images: Record<string, string> = {};
+      for (const room of body?.data ?? []) if (room.image_url) images[room.zone_id] = room.image_url;
+      roomImagesRef.current = images;
+      return images;
+    } catch {
+      return {}; // not cached: the next preview tries again; the built-in photo is used meanwhile
+    }
+  }
+
   function showRoomPreview(room: string) {
     const info = ROOM_DISPLAY_INFO[room];
     if (!info) return;
-    setRoomPreview(info);
+    setRoomPreview(info); // the built-in photo straight away...
+    const zoneId = ROOM_MAP[room]?.zone_id;
+    if (!zoneId) return;
+    // ...then the room's own photo from Spacebring, if it has one.
+    loadRoomImages().then((images) => {
+      const remote = images[zoneId];
+      if (remote) setRoomPreview((current) => (current && current.label === info.label ? { ...info, imageUrl: remote } : current));
+    });
   }
 
   // --- Tools --------------------------------------------------------------
@@ -793,6 +816,7 @@ Be warm and professional, but brief - always.
     conversationEndedRef.current = false;
     turnAwaitingUserRef.current = true;
     cancelledResponseIdsRef.current.clear();
+    roomImagesRef.current = null; // fetch the rooms' photos afresh for each conversation
     assistantSpeakingRef.current = false;
     audioPlayingRef.current = false;
     clearInterruptTimer();
